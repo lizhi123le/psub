@@ -3311,8 +3311,11 @@ function replacetg(link, replacements, isRecovery) {
 function replaceSSR(link, replacements, isRecovery) {
   link = link.slice("ssr://".length).replace("\r", "").split("#")[0];
   link = urlSafeBase64Decode(link);
-  const regexMatch = link.match(/(\S+):(\d+?):(\S+?):(\S+?):(\S+?):(\S+)\//);
+  // SSR格式: server:port:protocol:method:obfs:password/...
+  // 支持IPv6地址(带[]或不带)、域名、IPv4
+  const regexMatch = link.match(/([\[\]\da-fA-F:\.]+|[\w\.-]+):(\d+?):(\S+?):(\S+?):(\S+?):(\S+)\//);
   if (!regexMatch) {
+    console.log('[psub] replaceSSR: 无法匹配链接格式:', link.substring(0, 80));
     return;
   }
   const [, server, , , , , password] = regexMatch;
@@ -3334,7 +3337,8 @@ function replaceVmess(link, replacements, isRecovery) {
   const regexMatchRocketStyle = link.match(/vmess:\/\/([A-Za-z0-9-_]+)\?(.*)/);
   if (regexMatchRocketStyle) {
     const base64Data = regexMatchRocketStyle[1];
-    const regexMatch = urlSafeBase64Decode(base64Data).match(/(.*?):(.*?)@(.*):(.*)/);
+    // 支持IPv6地址的正则: [IPv6]:port 或 hostname:port 或 IP:port
+    const regexMatch = urlSafeBase64Decode(base64Data).match(/(.*?):(.*?)@(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):(.*)/);
     if (!regexMatch)
       return;
     const [, cipher, uuid, server, port] = regexMatch;
@@ -3344,7 +3348,8 @@ function replaceVmess(link, replacements, isRecovery) {
     const result = link.replace(base64Data, newStr);
     return result;
   }
-  const regexMatchKitsunebiStyle = link.match(/vmess1:\/\/(.*?)@(.*):(.*?)\?(.*)/);
+  // 支持IPv6地址的正则: [IPv6]:port 或 hostname:port 或 IP:port
+  const regexMatchKitsunebiStyle = link.match(/vmess1:\/\/(.*?)@(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):(.*?)\?(.*)/);
   if (regexMatchKitsunebiStyle) {
     const [, uuid, server] = regexMatchKitsunebiStyle;
     replacements[randomDomain] = server;
@@ -3392,8 +3397,10 @@ function replaceSS(link, replacements, isRecovery) {
   let replacedString;
   let tempLink = link.slice("ss://".length).split("#")[0];
   if (tempLink.includes("@")) {
-    const regexMatch1 = tempLink.match(/(\S+?)@(\S+):/);
+    // 支持IPv6地址的正则: [IPv6]:port 或 hostname:port 或 IP:port
+    const regexMatch1 = tempLink.match(/(\S+?)@(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):/);
     if (!regexMatch1) {
+      console.log('[psub] replaceSS: 无法匹配链接格式(带@):', link.substring(0, 80));
       return;
     }
     const [, base64Data, server] = regexMatch1;
@@ -3414,8 +3421,10 @@ function replaceSS(link, replacements, isRecovery) {
   } else {
     try {
       const decodedValue = urlSafeBase64Decode(tempLink);
-      const regexMatch = decodedValue.match(/(\S+?):(\S+)@(\S+):/);
+      // 支持IPv6地址的正则: [IPv6]:port 或 hostname:port 或 IP:port
+      const regexMatch = decodedValue.match(/(\S+?):(\S+)@(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):/);
       if (!regexMatch) {
+        console.log('[psub] replaceSS: 无法匹配链接格式(无@):', link.substring(0, 80));
         return;
       }
       const [, , password, server] = regexMatch;
@@ -3434,8 +3443,10 @@ function replaceSS(link, replacements, isRecovery) {
 function replaceTrojan(link, replacements, isRecovery) {
   const randomUUID = generateRandomUUID();
   const randomDomain = generateRandomStr(10) + ".com";
-  const regexMatch = link.match(/(vless|trojan):\/\/(.*?)@(.*?):/);
+  // 支持IPv6地址的正则: [IPv6]:port 或 hostname:port 或 IP:port
+  const regexMatch = link.match(/(vless|trojan):\/\/(.*?)@(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):/);
   if (!regexMatch) {
+    console.log('[psub] replaceTrojan: 无法匹配链接格式:', link.substring(0, 80));
     return;
   }
   const [, , uuid, server] = regexMatch;
@@ -3449,8 +3460,10 @@ function replaceTrojan(link, replacements, isRecovery) {
   }
 }
 function replaceHysteria(link, replacements) {
-  const regexMatch = link.match(/hysteria:\/\/(.*):(.*?)\?/);
+  // 支持IPv6地址: [IPv6]:port 或 hostname:port 或 IP:port
+  const regexMatch = link.match(/hysteria:\/\/(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):/);
   if (!regexMatch) {
+    console.log('[psub] replaceHysteria: 无法匹配链接格式:', link.substring(0, 80));
     return;
   }
   const server = regexMatch[1];
@@ -3461,8 +3474,10 @@ function replaceHysteria(link, replacements) {
 function replaceHysteria2(link, replacements, isRecovery) {
     const randomUUID = generateRandomUUID();
     const randomDomain = generateRandomStr(10) + ".com";
-    const regexMatch = link.match(/(hysteria2):\/\/(.*)@(.*?):/);
+    // 支持IPv6地址的正则: [IPv6]:port 或 hostname:port 或 IP:port
+    const regexMatch = link.match(/(hysteria2):\/\/(.*)@(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):/);
     if (!regexMatch) {
+        console.log('[psub] replaceHysteria2: 无法匹配链接格式:', link.substring(0, 80));
         return;
     }
     const [, , uuid, server] = regexMatch;
