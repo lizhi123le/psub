@@ -3377,19 +3377,26 @@ function replaceSocks(link, replacements, isRecovery) {
   const atIndex = tempLink.indexOf("@");
   
   if (isRecovery) {
-    // 恢复模式：直接替换字符串中的域名和密码
+    // 恢复模式：直接替换字符串中的fakeIP和密码
     let result = link;
     for (const [key, value] of Object.entries(replacements)) {
-      // 只替换完整的匹配（作为域名或密码）
-      const domainRegex = new RegExp(`(^|[^\\w])${escapeRegExp(key)}($|[^\\w])`, 'g');
-      result = result.replace(domainRegex, (match, p1, p2) => p1 + value + p2);
+      // 对于IP地址，使用全局替换
+      if (/^\d+\.\d+\.\d+\.\d+$/.test(key)) {
+        // IP地址替换
+        result = result.replace(new RegExp(escapeRegExp(key), 'g'), value);
+      } else {
+        // 密码替换 - 使用单词边界匹配
+        const passRegex = new RegExp(`(^|[^\\w])${escapeRegExp(key)}($|[^\\w])`, 'g');
+        result = result.replace(passRegex, (match, p1, p2) => p1 + value + p2);
+      }
     }
+    console.log('[psub] SOCKS已恢复:', link.substring(0, 50), '->', result.substring(0, 50));
     return result;
   }
   
-  // 混淆模式
-  const randomDomain = generateRandomLetters(10) + ".com";
-  const randomPassword = generateRandomLetters(12);
+  // 混淆模式 - 使用私有IP地址代替随机域名，避免subconverter解析问题
+  const fakeIP = `10.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}`;
+  const randomPassword = generateRandomStr(12);
   let replacedString;
   
   if (atIndex !== -1) {
@@ -3412,14 +3419,16 @@ function replaceSocks(link, replacements, isRecovery) {
       const server = serverMatch[1];
       const port = serverMatch[2];
       
-      replacements[randomDomain] = server;
-      replacements[randomPassword] = password;
+      // 保存映射关系
+      replacements[fakeIP] = server;
+      if (password) replacements[randomPassword] = password;
       
       // 生成新的认证信息
       const newAuth = `${username}:${randomPassword}`;
       const newAuthBase64 = btoa(newAuth);
       
-      replacedString = `socks://${newAuthBase64}@${randomDomain}:${port}${hashPart}`;
+      replacedString = `socks://${newAuthBase64}@${fakeIP}:${port}${hashPart}`;
+      console.log('[psub] SOCKS带认证已混淆:', server, '->', fakeIP);
     } catch (e) {
       console.log('[psub] replaceSocks: 认证信息解码失败:', e.message);
       return;
@@ -3434,9 +3443,11 @@ function replaceSocks(link, replacements, isRecovery) {
     const server = serverMatch[1];
     const port = serverMatch[2];
     
-    replacements[randomDomain] = server;
+    // 保存映射关系
+    replacements[fakeIP] = server;
     
-    replacedString = `socks://${randomDomain}:${port}${hashPart}`;
+    replacedString = `socks://${fakeIP}:${port}${hashPart}`;
+    console.log('[psub] SOCKS无认证已混淆:', server, '->', fakeIP);
   }
   
   return replacedString;
@@ -3660,7 +3671,13 @@ function urlSafeBase64Decode(input) {
   }
 }
 function generateRandomStr(len) {
-  return Math.random().toString(36).substring(2, len);
+  // 生成只包含小写字母和数字的随机字符串，确保没有特殊字符
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let result = '';
+  for (let i = 0; i < len; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
 }
 function generateRandomLetters(len) {
   // 生成只包含小写字母的随机字符串
