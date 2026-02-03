@@ -2916,6 +2916,7 @@ init_modules_watch_stub();
 var yaml = require_js_yaml();
 var src_default = {
   async fetch(request, env) {
+    try {
     const url = new URL(request.url);
     const host = url.origin;
     const frontendUrl = 'https://raw.githubusercontent.com/aylz10/psub/main/index.html';
@@ -3061,9 +3062,10 @@ var src_default = {
           
           try {
             parsedObj = parseData(decodedContent);
+            console.log('[psub] parseData结果:', parsedObj ? parsedObj.format : 'undefined');
           } catch (parseError) {
             console.error('[psub] 解析直接传入的内容失败:', parseError.message);
-            continue;
+            parsedObj = { format: "unknown", data: null };
           }
         }
         if (/^(ssr?|vmess1?|trojan|vless|hysteria|hysteria2|tg):\/\//.test(url2)) {
@@ -3071,7 +3073,15 @@ var src_default = {
           if (newLink)
             replacedURIs.push(newLink);
           continue;
-        } else if ("base64" === parsedObj.format) {
+        }
+        
+        // 确保 parsedObj 存在
+        if (!parsedObj) {
+          console.error('[psub] parsedObj 为空，跳过:', url2);
+          continue;
+        }
+        
+        if (parsedObj && "base64" === parsedObj.format) {
           const links = parsedObj.data.split(/\r?\n/).filter((link) => link.trim() !== "");
           console.log('[psub] base64格式, 节点数:', links.length);
           
@@ -3082,9 +3092,14 @@ var src_default = {
           
           const newLinks = [];
           for (const link of links) {
-            const newLink = replaceInUri(link, replacements, false);
-            if (newLink)
-              newLinks.push(newLink);
+            try {
+              const newLink = replaceInUri(link, replacements, false);
+              if (newLink)
+                newLinks.push(newLink);
+            } catch (replaceError) {
+              console.error('[psub] 处理节点失败:', link.substring(0, 50), replaceError.message);
+              // 跳过这个节点，继续处理其他节点
+            }
           }
           
           console.log('[psub] 混淆后节点数:', newLinks.length);
@@ -3100,7 +3115,7 @@ var src_default = {
             keys.push(key);
             replacedURIs.push(`${host}/${subDir}/${key}`);
           }
-        } else if ("yaml" === parsedObj.format) {
+        } else if (parsedObj && "yaml" === parsedObj.format) {
           console.log('[psub] yaml格式, proxies数量:', parsedObj.data.proxies?.length || 0);
           
           if (!parsedObj.data.proxies || parsedObj.data.proxies.length === 0) {
@@ -3218,9 +3233,13 @@ var src_default = {
         const links = decodedData.split(/\r?\n/).filter((link) => link.trim() !== "");
         const newLinks = [];
         for (const link of links) {
-          const newLink = replaceInUri(link, replacements, true);
-          if (newLink)
-            newLinks.push(newLink);
+          try {
+            const newLink = replaceInUri(link, replacements, true);
+            if (newLink)
+              newLinks.push(newLink);
+          } catch (replaceError) {
+            console.error('[psub] 后端响应处理节点失败:', link.substring(0, 50), replaceError.message);
+          }
         }
         const replacedBase64Data = btoa(newLinks.join("\r\n"));
         return new Response(replacedBase64Data, {
@@ -3253,6 +3272,13 @@ var src_default = {
       `Backend error: ${rpResponse.status} ${rpResponse.statusText}\n\n${errorText.substring(0, 1000)}`,
       { status: rpResponse.status }
     );
+    } catch (globalError) {
+      console.error('[psub] 全局错误:', globalError);
+      return new Response(
+        `Internal Server Error: ${globalError.message}\n\nStack: ${globalError.stack}`,
+        { status: 500, headers: { 'Content-Type': 'text/plain; charset=utf-8' } }
+      );
+    }
   }
 };
 function replaceInUri(link, replacements, isRecovery) {
@@ -3432,7 +3458,7 @@ function replaceHysteria(link, replacements) {
   replacements[randomDomain] = server;
   return link.replace(server, randomDomain);
 }
-function replaceHysteria2(link, replacements) {
+function replaceHysteria2(link, replacements, isRecovery) {
     const randomUUID = generateRandomUUID();
     const randomDomain = generateRandomStr(10) + ".com";
     const regexMatch = link.match(/(hysteria2):\/\/(.*)@(.*?):/);
