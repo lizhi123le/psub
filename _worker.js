@@ -3005,7 +3005,7 @@ var src_default = {
           console.log('[psub] 获取订阅:', url2);
           try {
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 20000); // 增加到20秒
+            const timeoutId = setTimeout(() => controller.abort(), 20000);
             response = await fetch(url2, {
               method: 'GET',
               headers: {
@@ -3027,7 +3027,7 @@ var src_default = {
             console.error('[psub] 订阅URL返回错误状态码:', url2, 'Status:', response.status, response.statusText);
             continue;
           }
-          console.log('[psub] 订阅URL响应成功, 状态码:', response.status, 'Content-Type:', response.headers.get('Content-Type'));
+          console.log('[psub] 订阅URL响应成功, 状态码:', response.status);
           const plaintextData = await response.text();
           if (!plaintextData || plaintextData.trim().length === 0) {
             console.error('[psub] 获取的订阅内容为空:', url2);
@@ -3044,7 +3044,27 @@ var src_default = {
           await SUB_BUCKET.put(key + "_headers", JSON.stringify(Object.fromEntries(response.headers)));
           keys.push(key);
         } else {
-          parsedObj = parseData(url2);
+          // 直接传入的内容（base64编码的节点列表）
+          console.log('[psub] 处理直接传入的内容, 长度:', url2.length);
+          console.log('[psub] 内容前50字符:', url2.substring(0, 50));
+          
+          // 先进行URL解码（处理URL编码的base64，如%3D=%）
+          let decodedContent;
+          try {
+            decodedContent = decodeURIComponent(url2);
+            console.log('[psub] URL解码成功, 新长度:', decodedContent.length);
+          } catch (e) {
+            // 如果URL解码失败，使用原始内容
+            decodedContent = url2;
+            console.log('[psub] URL解码失败，使用原始内容');
+          }
+          
+          try {
+            parsedObj = parseData(decodedContent);
+          } catch (parseError) {
+            console.error('[psub] 解析直接传入的内容失败:', parseError.message);
+            continue;
+          }
         }
         if (/^(ssr?|vmess1?|trojan|vless|hysteria|hysteria2|tg):\/\//.test(url2)) {
           const newLink = replaceInUri(url2, replacements, false);
@@ -3457,8 +3477,12 @@ function urlSafeBase64Encode(input) {
   return btoa(input).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 function urlSafeBase64Decode(input) {
-  const padded = input + "=".repeat((4 - input.length % 4) % 4);
-  return atob(padded.replace(/-/g, "+").replace(/_/g, "/"));
+  try {
+    const padded = input + "=".repeat((4 - input.length % 4) % 4);
+    return atob(padded.replace(/-/g, "+").replace(/_/g, "/"));
+  } catch (e) {
+    throw new Error('Base64 decode failed: ' + e.message);
+  }
 }
 function generateRandomStr(len) {
   return Math.random().toString(36).substring(2, len);
