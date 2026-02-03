@@ -2968,8 +2968,10 @@ var src_default = {
       }
     }
     const backendParam = url.searchParams.get("bd");
-    if (backendParam && /^(https?:\/\/[^/]+)[.].+$/g.test(backendParam))
+    if (backendParam && /^https?:\/\/.+/i.test(backendParam)) {
       backend = backendParam.replace(/(https?:\/\/[^/]+).*$/, "$1");
+      console.log('[psub] 使用自定义后端:', backend);
+    }
     const replacements = {};
     const replacedURIs = [];
     const keys = [];
@@ -2992,11 +2994,24 @@ var src_default = {
       for (const url2 of urlParts) {
         const key = generateRandomStr(11);
         if (url2.startsWith("https://") || url2.startsWith("http://")) {
-          response = await fetch(url2, {
-            method: request.method,
-            headers: request.headers,
-            redirect: 'follow', // https://developers.cloudflare.com/workers/runtime-apis/request#constructor
-          });
+          console.log('[psub] 获取订阅:', url2);
+          try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 10000);
+            response = await fetch(url2, {
+              method: 'GET',
+              headers: {
+                'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': '*/*',
+              },
+              redirect: 'follow',
+              signal: controller.signal,
+            });
+            clearTimeout(timeoutId);
+          } catch (fetchError) {
+            console.error('[psub] 获取订阅失败:', url2, fetchError.message);
+            continue;
+          }
           if (!response.ok)
             continue;
           const plaintextData = await response.text();
@@ -3037,13 +3052,41 @@ var src_default = {
     }
     const newUrl = replacedURIs.join("|");
     url.searchParams.set("url", newUrl);
-    const modifiedRequest = new Request(backend + url.pathname + url.search, request);
-    const rpResponse = await fetch(modifiedRequest);
+    
+    // 构建转发到后端的请求，添加必要的请求头
+    const backendUrl = backend + url.pathname + url.search;
+    console.log('[psub] 转发到后端:', backendUrl);
+    console.log('[psub] 处理后的订阅URL:', newUrl.substring(0, 200) + '...');
+    
+    const modifiedRequest = new Request(backendUrl, {
+      method: request.method,
+      headers: {
+        'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': '*/*',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+        'Cache-Control': 'no-cache',
+      },
+    });
+    
+    let rpResponse;
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000);
+      rpResponse = await fetch(modifiedRequest, { signal: controller.signal });
+      clearTimeout(timeoutId);
+    } catch (error) {
+      console.error('[psub] 后端请求失败:', error);
+      return new Response('Backend request failed: ' + error.message, { status: 503 });
+    }
     for (const key of keys) {
       await SUB_BUCKET.delete(key);
     }
+    console.log('[psub] 后端响应状态:', rpResponse.status);
+    
     if (rpResponse.status === 200) {
       const plaintextData = await rpResponse.text();
+      console.log('[psub] 后端返回内容长度:', plaintextData.length);
+      console.log('[psub] 后端返回内容前200字符:', plaintextData.substring(0, 200));
       try {
         const decodedData = urlSafeBase64Decode(plaintextData);
         const links = decodedData.split(/\r?\n/).filter((link) => link.trim() !== "");
@@ -3063,7 +3106,14 @@ var src_default = {
         return new Response(result, rpResponse);
       }
     }
-    return rpResponse;
+    
+    // 非200状态，记录错误并返回详细信息
+    const errorText = await rpResponse.text().catch(() => 'No error details');
+    console.error('[psub] 后端错误响应:', rpResponse.status, errorText.substring(0, 500));
+    return new Response(
+      `Backend error: ${rpResponse.status} ${rpResponse.statusText}\n\n${errorText.substring(0, 1000)}`,
+      { status: rpResponse.status }
+    );
   }
 };
 function replaceInUri(link, replacements, isRecovery) {
