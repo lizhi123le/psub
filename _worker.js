@@ -3058,6 +3058,16 @@ var src_default = {
           }
           
           console.log('[psub] HTTP订阅解析格式:', parsedObj.format);
+          
+          // 兜底处理：如果HTTP获取的内容无法识别为任何已知格式，直接存储原始内容
+          if (!parsedObj || parsedObj.format === "unknown" || !parsedObj.data) {
+            console.log('[psub] HTTP订阅无法解析为base64/yaml，直接存储原始响应');
+            await SUB_BUCKET.put(key, plaintextData);
+            keys.push(key);
+            replacedURIs.push(`${host}/${subDir}/${key}`);
+            console.log('[psub] HTTP原始内容已存储(兜底):', `${host}/${subDir}/${key}`);
+            continue;
+          }
         } else {
           // 直接传入的内容（base64编码的节点列表）
           console.log('[psub] 处理直接传入的内容, 长度:', url2.length);
@@ -3109,20 +3119,34 @@ var src_default = {
           }
           
           const newLinks = [];
+          let failCount = 0;
           for (const link of links) {
             try {
               const newLink = replaceInUri(link, replacements, false);
-              if (newLink)
+              if (newLink) {
                 newLinks.push(newLink);
+              } else {
+                failCount++;
+                if (failCount <= 3) {
+                  console.log('[psub] 节点处理返回空:', link.substring(0, 80));
+                }
+              }
             } catch (replaceError) {
+              failCount++;
               console.error('[psub] 处理节点失败:', link.substring(0, 50), replaceError.message);
             }
           }
           
-          console.log('[psub] 混淆后节点数:', newLinks.length);
+          console.log('[psub] 节点处理结果: 总数', links.length, '成功', newLinks.length, '失败', failCount);
           
           if (newLinks.length === 0) {
             console.error('[psub] 混淆后无有效节点:', url2);
+            // 如果全部失败，尝试存储原始内容
+            console.log('[psub] 尝试存储原始base64内容');
+            await SUB_BUCKET.put(key, btoa(parsedObj.data));
+            keys.push(key);
+            replacedURIs.push(`${host}/${subDir}/${key}`);
+            console.log('[psub] 原始base64内容已存储:', `${host}/${subDir}/${key}`);
             continue;
           }
           
