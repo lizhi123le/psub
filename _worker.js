@@ -2999,7 +2999,7 @@ var src_default = {
       const urlParts = urlParam.split("|").filter((part) => part.trim() !== "");
       if (urlParts.length === 0)
         return new Response("There are no valid links", { status: 400 });
-      let response, parsedObj;
+      let response, parsedObj, plaintextData;
       for (const url2 of urlParts) {
         const key = generateRandomStr(11);
         if (url2.startsWith("https://") || url2.startsWith("http://")) {
@@ -3029,7 +3029,7 @@ var src_default = {
             continue;
           }
           console.log('[psub] 订阅URL响应成功, 状态码:', response.status);
-          const plaintextData = await response.text();
+          plaintextData = await response.text();
           if (!plaintextData || plaintextData.trim().length === 0) {
             console.error('[psub] 获取的订阅内容为空:', url2);
             continue;
@@ -3042,8 +3042,8 @@ var src_default = {
             continue;
           }
           console.log('[psub] 解析订阅格式:', parsedObj.format);
+          // 存储原始响应头
           await SUB_BUCKET.put(key + "_headers", JSON.stringify(Object.fromEntries(response.headers)));
-          keys.push(key);
         } else {
           // 直接传入的内容（base64编码的节点列表）
           console.log('[psub] 处理直接传入的内容, 长度:', url2.length);
@@ -3068,10 +3068,13 @@ var src_default = {
             parsedObj = { format: "unknown", data: null };
           }
         }
+        // 处理直接传入的节点链接（非HTTP URL）
         if (/^(ssr?|vmess1?|trojan|vless|hysteria|hysteria2|tg):\/\//.test(url2)) {
           const newLink = replaceInUri(url2, replacements, false);
-          if (newLink)
+          if (newLink) {
             replacedURIs.push(newLink);
+            console.log('[psub] 直接节点链接已混淆:', newLink.substring(0, 50));
+          }
           continue;
         }
         
@@ -3081,6 +3084,7 @@ var src_default = {
           continue;
         }
         
+        // 处理 base64 格式的订阅内容（HTTP获取或直接传入）
         if (parsedObj && "base64" === parsedObj.format) {
           const links = parsedObj.data.split(/\r?\n/).filter((link) => link.trim() !== "");
           console.log('[psub] base64格式, 节点数:', links.length);
@@ -3098,7 +3102,6 @@ var src_default = {
                 newLinks.push(newLink);
             } catch (replaceError) {
               console.error('[psub] 处理节点失败:', link.substring(0, 50), replaceError.message);
-              // 跳过这个节点，继续处理其他节点
             }
           }
           
@@ -3114,8 +3117,11 @@ var src_default = {
             await SUB_BUCKET.put(key, replacedBase64Data);
             keys.push(key);
             replacedURIs.push(`${host}/${subDir}/${key}`);
+            console.log('[psub] base64内容已混淆存储:', `${host}/${subDir}/${key}`);
           }
-        } else if (parsedObj && "yaml" === parsedObj.format) {
+        } 
+        // 处理 yaml 格式的订阅内容（HTTP获取或直接传入）
+        else if (parsedObj && "yaml" === parsedObj.format) {
           console.log('[psub] yaml格式, proxies数量:', parsedObj.data.proxies?.length || 0);
           
           if (!parsedObj.data.proxies || parsedObj.data.proxies.length === 0) {
@@ -3128,7 +3134,16 @@ var src_default = {
             await SUB_BUCKET.put(key, replacedYAMLData);
             keys.push(key);
             replacedURIs.push(`${host}/${subDir}/${key}`);
+            console.log('[psub] yaml内容已混淆存储:', `${host}/${subDir}/${key}`);
           }
+        }
+        // 对于HTTP URL获取的未知格式，直接存储原始内容
+        else if (url2.startsWith("https://") || url2.startsWith("http://")) {
+          console.log('[psub] HTTP订阅内容格式未知，直接存储:', parsedObj.format);
+          await SUB_BUCKET.put(key, plaintextData);
+          keys.push(key);
+          replacedURIs.push(`${host}/${subDir}/${key}`);
+          console.log('[psub] HTTP内容已存储:', `${host}/${subDir}/${key}`);
         }
       }
     }
