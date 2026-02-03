@@ -3005,7 +3005,7 @@ var src_default = {
           console.log('[psub] 获取订阅:', url2);
           try {
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 10000);
+            const timeoutId = setTimeout(() => controller.abort(), 20000); // 增加到20秒
             response = await fetch(url2, {
               method: 'GET',
               headers: {
@@ -3017,17 +3017,24 @@ var src_default = {
             });
             clearTimeout(timeoutId);
           } catch (fetchError) {
-            console.error('[psub] 获取订阅失败:', url2, fetchError.message);
+            console.error('[psub] 获取订阅失败:', url2, '错误类型:', fetchError.name, '消息:', fetchError.message);
+            if (fetchError.name === 'AbortError') {
+              console.error('[psub] 请求超时(20秒):', url2);
+            }
             continue;
           }
-          if (!response.ok)
+          if (!response.ok) {
+            console.error('[psub] 订阅URL返回错误状态码:', url2, 'Status:', response.status, response.statusText);
             continue;
+          }
+          console.log('[psub] 订阅URL响应成功, 状态码:', response.status, 'Content-Type:', response.headers.get('Content-Type'));
           const plaintextData = await response.text();
           if (!plaintextData || plaintextData.trim().length === 0) {
             console.error('[psub] 获取的订阅内容为空:', url2);
             continue;
           }
           console.log('[psub] 获取订阅内容成功, 长度:', plaintextData.length);
+          console.log('[psub] 订阅内容前100字符:', plaintextData.substring(0, 100).replace(/\n/g, '\\n'));
           parsedObj = parseData(plaintextData);
           if (parsedObj.format === "unknown" || !parsedObj.data) {
             console.error('[psub] 无法解析订阅内容格式:', url2, parsedObj.format);
