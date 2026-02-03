@@ -2920,7 +2920,15 @@ var src_default = {
     const host = url.origin;
     const frontendUrl = 'https://raw.githubusercontent.com/aylz10/psub/main/index.html';
     const SUB_BUCKET = env.SUB_BUCKET;
+    
+    // 检查 BACKEND 配置
+    if (!env.BACKEND) {
+      console.error('[psub] 错误: 未配置 BACKEND 环境变量');
+      return new Response('Error: BACKEND environment variable is not configured', { status: 500 });
+    }
+    
     let backend = env.BACKEND.replace(/(https?:\/\/[^/]+).*$/, "$1");
+    console.log('[psub] 初始后端地址:', backend);
     const subDir = "subscription";
     const pathSegments = url.pathname.split("/").filter((segment) => segment.length > 0);
     if (pathSegments.length === 0) {
@@ -3015,7 +3023,17 @@ var src_default = {
           if (!response.ok)
             continue;
           const plaintextData = await response.text();
+          if (!plaintextData || plaintextData.trim().length === 0) {
+            console.error('[psub] 获取的订阅内容为空:', url2);
+            continue;
+          }
+          console.log('[psub] 获取订阅内容成功, 长度:', plaintextData.length);
           parsedObj = parseData(plaintextData);
+          if (parsedObj.format === "unknown" || !parsedObj.data) {
+            console.error('[psub] 无法解析订阅内容格式:', url2, parsedObj.format);
+            continue;
+          }
+          console.log('[psub] 解析订阅格式:', parsedObj.format);
           await SUB_BUCKET.put(key + "_headers", JSON.stringify(Object.fromEntries(response.headers)));
           keys.push(key);
         } else {
@@ -3028,12 +3046,27 @@ var src_default = {
           continue;
         } else if ("base64" === parsedObj.format) {
           const links = parsedObj.data.split(/\r?\n/).filter((link) => link.trim() !== "");
+          console.log('[psub] base64格式, 节点数:', links.length);
+          
+          if (links.length === 0) {
+            console.error('[psub] base64内容解析后无节点:', url2);
+            continue;
+          }
+          
           const newLinks = [];
           for (const link of links) {
             const newLink = replaceInUri(link, replacements, false);
             if (newLink)
               newLinks.push(newLink);
           }
+          
+          console.log('[psub] 混淆后节点数:', newLinks.length);
+          
+          if (newLinks.length === 0) {
+            console.error('[psub] 混淆后无有效节点:', url2);
+            continue;
+          }
+          
           const replacedBase64Data = btoa(newLinks.join("\r\n"));
           if (replacedBase64Data) {
             await SUB_BUCKET.put(key, replacedBase64Data);
@@ -3041,6 +3074,13 @@ var src_default = {
             replacedURIs.push(`${host}/${subDir}/${key}`);
           }
         } else if ("yaml" === parsedObj.format) {
+          console.log('[psub] yaml格式, proxies数量:', parsedObj.data.proxies?.length || 0);
+          
+          if (!parsedObj.data.proxies || parsedObj.data.proxies.length === 0) {
+            console.error('[psub] yaml内容无节点:', url2);
+            continue;
+          }
+          
           const replacedYAMLData = replaceYAML(parsedObj.data, replacements);
           if (replacedYAMLData) {
             await SUB_BUCKET.put(key, replacedYAMLData);
@@ -3050,21 +3090,40 @@ var src_default = {
         }
       }
     }
-    const newUrl = replacedURIs.join("|");
-    url.searchParams.set("url", newUrl);
     
-    // 构建转发到后端的请求，添加必要的请求头
-    const backendUrl = backend + url.pathname + url.search;
+    // 检查是否有有效内容
+    if (replacedURIs.length === 0) {
+      console.error('[psub] 错误: 所有订阅链接都无效或返回空内容');
+      return new Response(
+        'Error: All subscription links are invalid or returned empty content. Please check:\n' +
+        '1. The subscription URL is correct\n' +
+        '2. The subscription content is not empty\n' +
+        '3. The subscription format is supported (base64, yaml, or direct links)\n',
+        { status: 400, headers: { 'Content-Type': 'text/plain; charset=utf-8' } }
+      );
+    }
+    
+    console.log('[psub] 成功处理, 有效订阅链接数:', replacedURIs.length);
+    const newUrl = replacedURIs.join("|");
+    
+    // 保留原始请求的所有参数，只替换 url 参数
+    const originalParams = new URLSearchParams(url.search);
+    originalParams.set("url", newUrl);
+    
+    // 构建转发到后端的完整URL（保留所有原始参数：target, config, emoji, scv, fdn等）
+    const backendUrl = backend + url.pathname + "?" + originalParams.toString();
     console.log('[psub] 转发到后端:', backendUrl);
     console.log('[psub] 处理后的订阅URL:', newUrl.substring(0, 200) + '...');
+    console.log('[psub] 所有参数:', Object.fromEntries(originalParams));
     
     const modifiedRequest = new Request(backendUrl, {
-      method: request.method,
+      method: 'GET', // 订阅转换通常用GET
       headers: {
-        'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': '*/*',
+        'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/plain,application/json,application/x-yaml,*/*',
         'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
         'Cache-Control': 'no-cache',
+        'Referer': host,
       },
     });
     
@@ -3085,8 +3144,48 @@ var src_default = {
     
     if (rpResponse.status === 200) {
       const plaintextData = await rpResponse.text();
+      
+      // 检查后端返回是否为空
+      if (!plaintextData || plaintextData.trim().length === 0) {
+        console.error('[psub] 后端返回空内容');
+        return new Response(
+          'Error: Backend returned empty content. The subscription conversion may have failed.',
+          { status: 502, headers: { 'Content-Type': 'text/plain; charset=utf-8' } }
+        );
+      }
+      
+      // 检查后端返回是否包含错误信息
+      const lowerData = plaintextData.toLowerCase();
+      if (lowerData.includes('error') && lowerData.includes('not found') || 
+          lowerData.includes('invalid') || 
+          lowerData.includes('failed') ||
+          plaintextData.length < 50) {
+        console.error('[psub] 后端可能返回错误页面:', plaintextData.substring(0, 500));
+      }
+      
       console.log('[psub] 后端返回内容长度:', plaintextData.length);
       console.log('[psub] 后端返回内容前200字符:', plaintextData.substring(0, 200));
+      
+      // 获取目标类型，判断是否需要恢复混淆
+      const target = url.searchParams.get("target") || "";
+      
+      // 对于Clash和SingBox格式，直接返回（已经是明文配置）
+      if (target === "clash" || target === "singbox" || plaintextData.includes("proxies:") || plaintextData.trim().startsWith("{")) {
+        console.log('[psub] 返回明文配置格式, target:', target);
+        const result = plaintextData.replace(
+          new RegExp(Object.keys(replacements).join("|"), "g"),
+          (match) => replacements[match] || match
+        );
+        return new Response(result, {
+          status: 200,
+          headers: {
+            'Content-Type': target === 'singbox' ? 'application/json; charset=utf-8' : 'application/x-yaml; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+          }
+        });
+      }
+      
+      // 对于其他格式（可能是base64编码的节点列表），尝试解码并恢复
       try {
         const decodedData = urlSafeBase64Decode(plaintextData);
         const links = decodedData.split(/\r?\n/).filter((link) => link.trim() !== "");
@@ -3097,13 +3196,26 @@ var src_default = {
             newLinks.push(newLink);
         }
         const replacedBase64Data = btoa(newLinks.join("\r\n"));
-        return new Response(replacedBase64Data, rpResponse);
+        return new Response(replacedBase64Data, {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/plain; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+          }
+        });
       } catch (base64Error) {
+        // 不是base64，直接返回并恢复混淆
         const result = plaintextData.replace(
           new RegExp(Object.keys(replacements).join("|"), "g"),
           (match) => replacements[match] || match
         );
-        return new Response(result, rpResponse);
+        return new Response(result, {
+          status: 200,
+          headers: {
+            'Content-Type': rpResponse.headers.get('Content-Type') || 'text/plain; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+          }
+        });
       }
     }
     
