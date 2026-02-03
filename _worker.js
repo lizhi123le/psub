@@ -3352,6 +3352,9 @@ function replaceInUri(link, replacements, isRecovery) {
       return replaceHysteria2(link, replacements, isRecovery);
     case link.startsWith("tg://"):
       return replacetg(link, replacements, isRecovery);
+    case link.startsWith("socks://"):
+    case link.startsWith("socks5://"):
+      return replaceSocks(link, replacements, isRecovery);
     default:
       return;
   }
@@ -3359,6 +3362,72 @@ function replaceInUri(link, replacements, isRecovery) {
 
 function replacetg(link, replacements, isRecovery) {
   return link;
+}
+
+function replaceSocks(link, replacements, isRecovery) {
+  const randomDomain = generateRandomStr(10) + ".com";
+  const randomPassword = generateRandomStr(12);
+  
+  // 移除协议前缀
+  let tempLink = link.replace(/^socks5?:\/\//, "");
+  
+  // 分离 hash 部分
+  const hashIndex = tempLink.indexOf("#");
+  const hashPart = hashIndex !== -1 ? tempLink.slice(hashIndex) : "";
+  tempLink = hashIndex !== -1 ? tempLink.slice(0, hashIndex) : tempLink;
+  
+  let replacedString;
+  
+  // 检查是否包含认证信息 (格式: base64(user:pass)@server:port)
+  const atIndex = tempLink.indexOf("@");
+  if (atIndex !== -1) {
+    // 带认证的格式: base64@server:port
+    const authBase64 = tempLink.slice(0, atIndex);
+    const serverPort = tempLink.slice(atIndex + 1);
+    
+    try {
+      const auth = atob(authBase64); // 解码得到 user:pass
+      const colonIndex = auth.indexOf(":");
+      const username = colonIndex !== -1 ? auth.slice(0, colonIndex) : auth;
+      const password = colonIndex !== -1 ? auth.slice(colonIndex + 1) : "";
+      
+      // 提取服务器和端口 (支持IPv6)
+      const serverMatch = serverPort.match(/^(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):(\d+)$/);
+      if (!serverMatch) {
+        console.log('[psub] replaceSocks: 无法匹配服务器地址:', serverPort);
+        return;
+      }
+      const server = serverMatch[1];
+      const port = serverMatch[2];
+      
+      replacements[randomDomain] = server;
+      replacements[randomPassword] = password;
+      
+      // 生成新的认证信息
+      const newAuth = `${username}:${randomPassword}`;
+      const newAuthBase64 = btoa(newAuth);
+      
+      replacedString = `socks://${newAuthBase64}@${randomDomain}:${port}${hashPart}`;
+    } catch (e) {
+      console.log('[psub] replaceSocks: 认证信息解码失败:', e.message);
+      return;
+    }
+  } else {
+    // 无认证的格式: server:port
+    const serverMatch = tempLink.match(/^(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):(\d+)$/);
+    if (!serverMatch) {
+      console.log('[psub] replaceSocks: 无法匹配服务器地址:', tempLink);
+      return;
+    }
+    const server = serverMatch[1];
+    const port = serverMatch[2];
+    
+    replacements[randomDomain] = server;
+    
+    replacedString = `socks://${randomDomain}:${port}${hashPart}`;
+  }
+  
+  return replacedString;
 }
 
 function replaceSSR(link, replacements, isRecovery) {
