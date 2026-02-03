@@ -3037,13 +3037,27 @@ var src_default = {
           console.log('[psub] 获取订阅内容成功, 长度:', plaintextData.length);
           console.log('[psub] 订阅内容前100字符:', plaintextData.substring(0, 100).replace(/\n/g, '\\n'));
           parsedObj = parseData(plaintextData);
-          if (parsedObj.format === "unknown" || !parsedObj.data) {
-            console.error('[psub] 无法解析订阅内容格式:', url2, parsedObj.format);
+          console.log('[psub] HTTP订阅解析结果:', parsedObj ? parsedObj.format : 'null', '有数据:', !!parsedObj.data);
+          
+          if (!parsedObj || !parsedObj.data) {
+            console.error('[psub] 订阅内容为空或解析失败:', url2);
             continue;
           }
-          console.log('[psub] 解析订阅格式:', parsedObj.format);
-          // 存储原始响应头
+          
+          // 存储原始响应头（所有格式都存储）
           await SUB_BUCKET.put(key + "_headers", JSON.stringify(Object.fromEntries(response.headers)));
+          
+          // 如果格式无法识别，直接存储原始内容
+          if (parsedObj.format === "unknown") {
+            console.log('[psub] HTTP订阅格式未知，直接存储原始内容');
+            await SUB_BUCKET.put(key, plaintextData);
+            keys.push(key);
+            replacedURIs.push(`${host}/${subDir}/${key}`);
+            console.log('[psub] 未知格式HTTP内容已存储:', `${host}/${subDir}/${key}`);
+            continue;
+          }
+          
+          console.log('[psub] HTTP订阅解析格式:', parsedObj.format);
         } else {
           // 直接传入的内容（base64编码的节点列表）
           console.log('[psub] 处理直接传入的内容, 长度:', url2.length);
