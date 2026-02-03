@@ -3465,12 +3465,22 @@ function generateRandomUUID() {
 }
 function parseData(data) {
   try {
-    return { format: "base64", data: urlSafeBase64Decode(data) };
-  } catch (base64Error) {
+    // 首先尝试标准 base64 解码 (btoa)
+    const decoded = atob(data);
+    return { format: "base64", data: decoded };
+  } catch (standardBase64Error) {
     try {
-      return { format: "yaml", data: yaml.load(data) };
-    } catch (yamlError) {
-      return { format: "unknown", data };
+      // 如果失败，尝试 url-safe base64 解码
+      const decoded = urlSafeBase64Decode(data);
+      return { format: "base64", data: decoded };
+    } catch (urlSafeBase64Error) {
+      try {
+        // 尝试解析为 YAML
+        return { format: "yaml", data: yaml.load(data) };
+      } catch (yamlError) {
+        // 如果都不是，返回原始数据
+        return { format: "unknown", data };
+      }
     }
   }
 }
