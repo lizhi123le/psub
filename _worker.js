@@ -3268,7 +3268,7 @@ var src_default = {
       if (target === "clash" || target === "singbox" || plaintextData.includes("proxies:") || plaintextData.trim().startsWith("{")) {
         console.log('[psub] 返回明文配置格式, target:', target);
         const result = plaintextData.replace(
-          new RegExp(Object.keys(replacements).join("|"), "g"),
+          new RegExp(Object.keys(replacements).map(escapeRegExp).join("|"), "g"),
           (match) => replacements[match] || match
         );
         return new Response(result, {
@@ -3305,7 +3305,7 @@ var src_default = {
       } catch (base64Error) {
         // 不是base64，直接返回并恢复混淆
         const result = plaintextData.replace(
-          new RegExp(Object.keys(replacements).join("|"), "g"),
+          new RegExp(Object.keys(replacements).map(escapeRegExp).join("|"), "g"),
           (match) => replacements[match] || match
         );
         return new Response(result, {
@@ -3365,9 +3365,6 @@ function replacetg(link, replacements, isRecovery) {
 }
 
 function replaceSocks(link, replacements, isRecovery) {
-  const randomDomain = generateRandomStr(10) + ".com";
-  const randomPassword = generateRandomStr(12);
-  
   // 移除协议前缀
   let tempLink = link.replace(/^socks5?:\/\//, "");
   
@@ -3376,10 +3373,25 @@ function replaceSocks(link, replacements, isRecovery) {
   const hashPart = hashIndex !== -1 ? tempLink.slice(hashIndex) : "";
   tempLink = hashIndex !== -1 ? tempLink.slice(0, hashIndex) : tempLink;
   
-  let replacedString;
-  
   // 检查是否包含认证信息 (格式: base64(user:pass)@server:port)
   const atIndex = tempLink.indexOf("@");
+  
+  if (isRecovery) {
+    // 恢复模式：直接替换字符串中的域名和密码
+    let result = link;
+    for (const [key, value] of Object.entries(replacements)) {
+      // 只替换完整的匹配（作为域名或密码）
+      const domainRegex = new RegExp(`(^|[^\\w])${escapeRegExp(key)}($|[^\\w])`, 'g');
+      result = result.replace(domainRegex, (match, p1, p2) => p1 + value + p2);
+    }
+    return result;
+  }
+  
+  // 混淆模式
+  const randomDomain = generateRandomLetters(10) + ".com";
+  const randomPassword = generateRandomLetters(12);
+  let replacedString;
+  
   if (atIndex !== -1) {
     // 带认证的格式: base64@server:port
     const authBase64 = tempLink.slice(0, atIndex);
@@ -3649,6 +3661,19 @@ function urlSafeBase64Decode(input) {
 }
 function generateRandomStr(len) {
   return Math.random().toString(36).substring(2, len);
+}
+function generateRandomLetters(len) {
+  // 生成只包含小写字母的随机字符串
+  const letters = 'abcdefghijklmnopqrstuvwxyz';
+  let result = '';
+  for (let i = 0; i < len; i++) {
+    result += letters.charAt(Math.floor(Math.random() * letters.length));
+  }
+  return result;
+}
+function escapeRegExp(string) {
+  // 转义正则表达式中的特殊字符
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 function generateRandomUUID() {
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
