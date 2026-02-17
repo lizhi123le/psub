@@ -3144,14 +3144,14 @@ var src_default = {
             console.error('[psub] 混淆后无有效节点:', url2);
             // 如果全部失败，尝试存储原始内容
             console.log('[psub] 尝试存储原始base64内容');
-            await SUB_BUCKET.put(key, btoa(parsedObj.data));
+            await SUB_BUCKET.put(key, utf8ToBase64(parsedObj.data));
             keys.push(key);
             replacedURIs.push(`${host}/${subDir}/${key}`);
             console.log('[psub] 原始base64内容已存储:', `${host}/${subDir}/${key}`);
             continue;
           }
           
-          const replacedBase64Data = btoa(newLinks.join("\r\n"));
+          const replacedBase64Data = utf8ToBase64(newLinks.join("\r\n"));
           if (replacedBase64Data) {
             await SUB_BUCKET.put(key, replacedBase64Data);
             keys.push(key);
@@ -3233,9 +3233,6 @@ var src_default = {
       console.error('[psub] 后端请求失败:', error);
       return new Response('Backend request failed: ' + error.message, { status: 503 });
     }
-    for (const key of keys) {
-      await SUB_BUCKET.delete(key);
-    }
     console.log('[psub] 后端响应状态:', rpResponse.status);
     
     if (rpResponse.status === 200) {
@@ -3272,6 +3269,10 @@ var src_default = {
           new RegExp(Object.keys(replacements).map(escapeRegExp).join("|"), "g"),
           (match) => replacements[match] || match
         );
+        // 清理临时数据
+        for (const key of keys) {
+          await SUB_BUCKET.delete(key).catch(() => {});
+        }
         return new Response(result, {
           status: 200,
           headers: {
@@ -3295,7 +3296,11 @@ var src_default = {
             console.error('[psub] 后端响应处理节点失败:', link.substring(0, 50), replaceError.message);
           }
         }
-        const replacedBase64Data = btoa(newLinks.join("\r\n"));
+        const replacedBase64Data = utf8ToBase64(newLinks.join("\r\n"));
+        // 清理临时数据
+        for (const key of keys) {
+          await SUB_BUCKET.delete(key).catch(() => {});
+        }
         return new Response(replacedBase64Data, {
           status: 200,
           headers: {
@@ -3309,6 +3314,10 @@ var src_default = {
           new RegExp(Object.keys(replacements).map(escapeRegExp).join("|"), "g"),
           (match) => replacements[match] || match
         );
+        // 清理临时数据
+        for (const key of keys) {
+          await SUB_BUCKET.delete(key).catch(() => {});
+        }
         return new Response(result, {
           status: 200,
           headers: {
@@ -3322,6 +3331,10 @@ var src_default = {
     // 非200状态，记录错误并返回详细信息
     const errorText = await rpResponse.text().catch(() => 'No error details');
     console.error('[psub] 后端错误响应:', rpResponse.status, errorText.substring(0, 500));
+    // 清理临时数据
+    for (const key of keys) {
+      await SUB_BUCKET.delete(key).catch(() => {});
+    }
     return new Response(
       `Backend error: ${rpResponse.status} ${rpResponse.statusText}\n\n${errorText.substring(0, 1000)}`,
       { status: rpResponse.status }
@@ -3430,7 +3443,7 @@ function replaceSocks(link, replacements, isRecovery) {
       
       // 生成新的认证信息
       const newAuth = `${username}:${randomPassword}`;
-      const newAuthBase64 = btoa(newAuth);
+      const newAuthBase64 = utf8ToBase64(newAuth);
       
       replacedString = `socks://${newAuthBase64}@${fakeIP}:${port}${hashPart}`;
       console.log('[psub] SOCKS带认证已混淆:', server, '->', fakeIP);
@@ -3471,7 +3484,13 @@ function replaceSSR(link, replacements, isRecovery) {
   const [, server, , , , , password] = regexMatch;
   let replacedString;
   if (isRecovery) {
-    replacedString = "ssr://" + urlSafeBase64Encode(link.replace(password, urlSafeBase64Encode(replacements[urlSafeBase64Decode(password)])).replace(server, replacements[server]));
+    const originalPassword = replacements[urlSafeBase64Decode(password)];
+    const originalServer = replacements[server];
+    if (!originalPassword || !originalServer) {
+      console.log('[psub] replaceSSR: 恢复时找不到原始值，返回原链接');
+      return link;
+    }
+    replacedString = "ssr://" + urlSafeBase64Encode(link.replace(password, urlSafeBase64Encode(originalPassword)).replace(server, originalServer));
   } else {
     const randomPassword = generateRandomStr(12);
     const randomDomain = generateRandomStr(12) + ".com";
@@ -3522,7 +3541,7 @@ function replaceVmess(link, replacements, isRecovery) {
       replacements[randomUUID] = uuid2;
       const regex2 = new RegExp(`${uuid2}|${server2}`, "g");
       const result2 = tempLink.replace(regex2, (match) => cReplace(match, uuid2, randomUUID, server2, randomDomain));
-      return "vmess://" + btoa(result2);
+      return "vmess://" + utf8ToBase64(result2);
     }
     const jsonData = JSON.parse(tempLink);
     const server = jsonData.add;
@@ -3536,7 +3555,7 @@ function replaceVmess(link, replacements, isRecovery) {
       replacements[randomUUID] = uuid;
       result = tempLink.replace(regex, (match) => cReplace(match, uuid, randomUUID, server, randomDomain));
     }
-    return "vmess://" + btoa(result);
+    return "vmess://" + utf8ToBase64(result);
   } catch (error) {
     return;
   }
@@ -3560,8 +3579,14 @@ function replaceSS(link, replacements, isRecovery) {
     }
     const [, encryption, password] = regexMatch2;
     if (isRecovery) {
-      const newStr = urlSafeBase64Encode(encryption + ":" + replacements[password]);
-      replacedString = link.replace(base64Data, newStr).replace(server, replacements[server]);
+      const originalPassword = replacements[password];
+      const originalServer = replacements[server];
+      if (!originalPassword || !originalServer) {
+        console.log('[psub] replaceSS: 恢复时找不到原始值，返回原链接');
+        return link;
+      }
+      const newStr = urlSafeBase64Encode(encryption + ":" + originalPassword);
+      replacedString = link.replace(base64Data, newStr).replace(server, originalServer);
     } else {
       replacements[randomDomain] = server;
       replacements[randomPassword] = password;
@@ -3600,12 +3625,18 @@ function replaceTrojan(link, replacements, isRecovery) {
     return;
   }
   const [, , uuid, server] = regexMatch;
-  replacements[randomDomain] = server;
-  replacements[randomUUID] = uuid;
   const regex = new RegExp(`${uuid}|${server}`, "g");
   if (isRecovery) {
-    return link.replace(regex, (match) => cReplace(match, uuid, replacements[uuid], server, replacements[server]));
+    const originalUUID = replacements[uuid];
+    const originalServer = replacements[server];
+    if (!originalUUID || !originalServer) {
+      console.log('[psub] replaceTrojan: 恢复时找不到原始值，返回原链接');
+      return link;
+    }
+    return link.replace(regex, (match) => cReplace(match, uuid, originalUUID, server, originalServer));
   } else {
+    replacements[randomDomain] = server;
+    replacements[randomUUID] = uuid;
     return link.replace(regex, (match) => cReplace(match, uuid, randomUUID, server, randomDomain));
   }
 }
@@ -3631,12 +3662,18 @@ function replaceHysteria2(link, replacements, isRecovery) {
         return;
     }
     const [, , uuid, server] = regexMatch;
-    replacements[randomDomain] = server;
-    replacements[randomUUID] = uuid;
     const regex = new RegExp(`${uuid}|${server}`, "g");
     if (isRecovery) {
-        return link.replace(regex, (match) => cReplace(match, uuid, replacements[uuid], server, replacements[server]));
+        const originalUUID = replacements[uuid];
+        const originalServer = replacements[server];
+        if (!originalUUID || !originalServer) {
+            console.log('[psub] replaceHysteria2: 恢复时找不到原始值，返回原链接');
+            return link;
+        }
+        return link.replace(regex, (match) => cReplace(match, uuid, originalUUID, server, originalServer));
     } else {
+        replacements[randomDomain] = server;
+        replacements[randomUUID] = uuid;
         return link.replace(regex, (match) => cReplace(match, uuid, randomUUID, server, randomDomain));
     }
 }
@@ -3705,6 +3742,29 @@ function generateRandomUUID() {
     return v.toString(16);
   });
 }
+
+// UTF-8 安全的 base64 编码（支持中文）
+function utf8ToBase64(str) {
+  try {
+    // 使用 encodeURIComponent 和 unescape 来处理 UTF-8 字符
+    return btoa(unescape(encodeURIComponent(str)));
+  } catch (e) {
+    console.error('[psub] UTF-8 base64 编码失败:', e.message);
+    // 降级：移除非 ASCII 字符后再编码
+    return btoa(str.replace(/[^\x00-\x7F]/g, '?'));
+  }
+}
+
+// UTF-8 安全的 base64 解码
+function base64ToUtf8(str) {
+  try {
+    return decodeURIComponent(escape(atob(str)));
+  } catch (e) {
+    console.error('[psub] UTF-8 base64 解码失败:', e.message);
+    return atob(str);
+  }
+}
+
 function parseData(data) {
   try {
     // 首先尝试标准 base64 解码 (btoa)
