@@ -43,12 +43,18 @@ export default async function handler(request) {
       clearTimeout(timeoutId);
       const text = await response.text();
       return new Response(text, {
-        headers: { 'Content-Type': 'text/plain' }
+        headers: { 
+          'Content-Type': 'text/plain',
+          'Access-Control-Allow-Origin': '*'
+        }
       });
     } catch (e) {
       return new Response(JSON.stringify({ error: e.message }), {
         status: 500,
-        headers: { 'Content-Type': 'application/json' }
+        headers: { 
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*'
+        }
       });
     }
   }
