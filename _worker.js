@@ -2991,15 +2991,25 @@ var src_default = {
       }
     } else if (url.pathname === '/version') {
       // 访问 /version 获取后端版本
-      const version = await fetch(`${backend}/version`);
-      const versionText = await version.text();
-      return new Response(versionText, {
-        status: 200,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
-        },
-      });
+      try {
+        const version = await fetch(`${backend}/version`, { signal: AbortSignal.timeout(5000) });
+        const versionText = await version.text();
+        return new Response(versionText, {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+          },
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ error: 'Backend unavailable', message: e.message, backend: backend }), {
+          status: 503,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+          },
+        });
+      }
     } else {
       return new Response("Missing URL parameter", { status: 400 });
     }
