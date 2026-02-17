@@ -2984,6 +2984,7 @@ var src_default = {
     const replacements = {};
     const replacedURIs = [];
     const keys = [];
+    const failedURLs = []; // 记录失败的URL和原因
     if (urlParam.startsWith("proxies:")) {
       const { format, data } = parseData(urlParam.replace(/\|/g, "\r\n"));
       if ("yaml" === format) {
@@ -3019,19 +3020,20 @@ var src_default = {
             clearTimeout(timeoutId);
           } catch (fetchError) {
             console.error('[psub] 获取订阅失败:', url2, '错误类型:', fetchError.name, '消息:', fetchError.message);
-            if (fetchError.name === 'AbortError') {
-              console.error('[psub] 请求超时(20秒):', url2);
-            }
+            const reason = fetchError.name === 'AbortError' ? '请求超时(20秒)' : `网络错误: ${fetchError.message}`;
+            failedURLs.push({url: url2, reason});
             continue;
           }
           if (!response.ok) {
             console.error('[psub] 订阅URL返回错误状态码:', url2, 'Status:', response.status, response.statusText);
+            failedURLs.push({url: url2, reason: `HTTP ${response.status} ${response.statusText}`});
             continue;
           }
           console.log('[psub] 订阅URL响应成功, 状态码:', response.status);
           plaintextData = await response.text();
           if (!plaintextData || plaintextData.trim().length === 0) {
             console.error('[psub] 获取的订阅内容为空:', url2);
+            failedURLs.push({url: url2, reason: '订阅内容为空'});
             continue;
           }
           console.log('[psub] 获取订阅内容成功, 长度:', plaintextData.length);
@@ -3190,13 +3192,19 @@ var src_default = {
     // 检查是否有有效内容
     if (replacedURIs.length === 0) {
       console.error('[psub] 错误: 所有订阅链接都无效或返回空内容');
-      return new Response(
-        'Error: All subscription links are invalid or returned empty content. Please check:\n' +
-        '1. The subscription URL is correct\n' +
+      let errorDetails = 'Error: All subscription links are invalid or returned empty content.\n\n';
+      if (failedURLs.length > 0) {
+        errorDetails += 'Failed URLs:\n';
+        failedURLs.forEach((item, index) => {
+          errorDetails += `${index + 1}. ${item.url.substring(0, 100)}\n   Reason: ${item.reason}\n`;
+        });
+        errorDetails += '\n';
+      }
+      errorDetails += 'Please check:\n' +
+        '1. The subscription URL is correct and accessible\n' +
         '2. The subscription content is not empty\n' +
-        '3. The subscription format is supported (base64, yaml, or direct links)\n',
-        { status: 400, headers: { 'Content-Type': 'text/plain; charset=utf-8' } }
-      );
+        '3. The subscription format is supported (base64, yaml, or direct links)\n';
+      return new Response(errorDetails, { status: 400, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
     }
     
     console.log('[psub] 成功处理, 有效订阅链接数:', replacedURIs.length);
