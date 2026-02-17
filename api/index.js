@@ -7,9 +7,6 @@ export const config = {
 // Environment - set BACKEND in Vercel dashboard
 const BACKEND = process.env.BACKEND || 'https://api.v1.mk';
 
-// Simple in-memory cache
-const memoryCache = new Map();
-
 function generateRandomStr(len) {
   const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
   let result = '';
@@ -63,15 +60,18 @@ export default async function handler(request) {
       return new Response('Missing url parameter', { status: 400 });
     }
     
-    // Store in memory
-    const key = generateRandomStr(16);
-    const host = url.origin;
-    const newUrl = `${host}/sub/${key}`;
+    // Forward to backend with all parameters
+    const params = new URLSearchParams();
+    params.set('url', targetUrl);
     
-    memoryCache.set(key, targetUrl);
+    // Forward all other parameters
+    for (const [key, value] of url.searchParams) {
+      if (key !== 'url') {
+        params.set(key, value);
+      }
+    }
     
-    // Forward to backend
-    const backendUrl = `${BACKEND}/sub?url=${encodeURIComponent(newUrl)}`;
+    const backendUrl = `${BACKEND}/sub?${params.toString()}`;
     
     try {
       const response = await fetch(backendUrl, {
@@ -82,7 +82,6 @@ export default async function handler(request) {
       });
       
       const content = await response.text();
-      memoryCache.delete(key);
       
       return new Response(content, {
         status: response.status,
@@ -92,25 +91,8 @@ export default async function handler(request) {
         }
       });
     } catch (e) {
-      memoryCache.delete(key);
       return new Response(`Error: ${e.message}`, { status: 500 });
     }
-  }
-  
-  // Check for stored subscription
-  const keyMatch = url.pathname.match(/^\/sub\/(.+)$/);
-  if (keyMatch) {
-    const key = keyMatch[1];
-    const stored = memoryCache.get(key);
-    if (stored) {
-      return new Response(stored, {
-        headers: {
-          'Content-Type': 'text/plain',
-          'Access-Control-Allow-Origin': '*',
-        }
-      });
-    }
-    return new Response('Not found', { status: 404 });
   }
   
   return new Response('Not found', { status: 404 });
