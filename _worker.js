@@ -2987,7 +2987,7 @@ var src_default = {
     if (urlParam.startsWith("proxies:")) {
       const { format, data } = parseData(urlParam.replace(/\|/g, "\r\n"));
       if ("yaml" === format) {
-        const key = generateRandomStr(11);
+        const key = generateRandomStr(16);
         const replacedYAMLData = replaceYAML(data, replacements);
         if (replacedYAMLData) {
           await SUB_BUCKET.put(key, replacedYAMLData);
@@ -3001,7 +3001,7 @@ var src_default = {
         return new Response("There are no valid links", { status: 400 });
       let response, parsedObj, plaintextData;
       for (const url2 of urlParts) {
-        const key = generateRandomStr(11);
+        const key = generateRandomStr(16);
         if (url2.startsWith("https://") || url2.startsWith("http://")) {
           console.log('[psub] 获取订阅:', url2);
           try {
@@ -3070,6 +3070,7 @@ var src_default = {
           }
         } else {
           // 直接传入的内容（base64编码的节点列表）
+          const key = generateRandomStr(16);
           console.log('[psub] 处理直接传入的内容, 长度:', url2.length);
           console.log('[psub] 内容前50字符:', url2.substring(0, 50));
           
@@ -3326,6 +3327,10 @@ var src_default = {
       { status: rpResponse.status }
     );
     } catch (globalError) {
+      // 清理存储的临时数据
+      for (const key of keys) {
+        await SUB_BUCKET.delete(key).catch(() => {});
+      }
       console.error('[psub] 全局错误:', globalError);
       return new Response(
         `Internal Server Error: ${globalError.message}\n\nStack: ${globalError.stack}`,
@@ -3672,6 +3677,7 @@ function urlSafeBase64Decode(input) {
 }
 function generateRandomStr(len) {
   // 生成只包含小写字母和数字的随机字符串，确保没有特殊字符
+  // 增加长度到16位以避免碰撞
   const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
   let result = '';
   for (let i = 0; i < len; i++) {
