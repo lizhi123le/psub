@@ -3035,7 +3035,12 @@ var src_default = {
           }
           if (!response.ok) {
             console.error('[psub] 订阅URL返回错误状态码:', url2, 'Status:', response.status, response.statusText);
-            failedURLs.push({url: url2, reason: `HTTP ${response.status} ${response.statusText}`});
+            // 如果是 530 错误（Cloudflare Worker 间防护），提供特殊提示
+            if (response.status === 530) {
+              failedURLs.push({url: url2, reason: 'HTTP 530 - Cloudflare Worker 间访问被拦截。请将订阅源部署到非 Cloudflare Worker 平台，或配置防火墙白名单。'});
+            } else {
+              failedURLs.push({url: url2, reason: `HTTP ${response.status} ${response.statusText}`});
+            }
             continue;
           }
           console.log('[psub] 订阅URL响应成功, 状态码:', response.status);
