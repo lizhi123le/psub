@@ -43,7 +43,7 @@ export default async function handler(request) {
       clearTimeout(timeoutId);
       const text = await response.text();
       return new Response(text, {
-        headers: { 'Content-Type': 'application/json' }
+        headers: { 'Content-Type': 'text/plain' }
       });
     } catch (e) {
       return new Response(JSON.stringify({ error: e.message }), {
