@@ -2932,7 +2932,13 @@ var src_default = {
     console.log('[psub] 初始后端地址:', backend);
     const subDir = "subscription";
     const pathSegments = url.pathname.split("/").filter((segment) => segment.length > 0);
-    if (pathSegments.length === 0) {
+    const urlParam = url.searchParams.get("url");
+    
+    // 优先检查是否有 url 参数（订阅转换）
+    if (urlParam) {
+      // 继续执行订阅转换逻辑
+    } else if (pathSegments.length === 0) {
+      // 根路径且没有 url 参数，返回前端页面
       const response = await fetch(frontendUrl);
       if (response.status !== 200) {
         return new Response('Failed to fetch frontend', { status: response.status });
@@ -2946,6 +2952,7 @@ var src_default = {
         },
       });
     } else if (pathSegments[0] === subDir) {
+      // 访问 /subscription/{key} 获取存储的订阅内容
       const key = pathSegments[pathSegments.length - 1];
       const object = await SUB_BUCKET.get(key);
       const object_headers = await SUB_BUCKET.get(key + "_headers");
@@ -2958,23 +2965,19 @@ var src_default = {
         const headers = object_headers ? new Headers(JSON.parse(object_headers)) : new Headers({ "Content-Type": "text/plain;charset=UTF-8" });
         return new Response(object, { headers });
       }
-    }
-
-    const urlParam = url.searchParams.get("url");
-    if (!urlParam) {
-      if (url.pathname === '/version') {
-        const version = await fetch(`${backend}/version`);
-        const versionText = await version.text();
-        return new Response(versionText, {
-          status: 200,
-          headers: {
-            'Content-Type': 'application/json',
-            'Access-Control-Allow-Origin': '*',
-          },
-        });
-      } else {
-        return new Response("Missing URL parameter", { status: 400 });
-      }
+    } else if (url.pathname === '/version') {
+      // 访问 /version 获取后端版本
+      const version = await fetch(`${backend}/version`);
+      const versionText = await version.text();
+      return new Response(versionText, {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+        },
+      });
+    } else {
+      return new Response("Missing URL parameter", { status: 400 });
     }
     const backendParam = url.searchParams.get("bd");
     if (backendParam && /^https?:\/\/.+/i.test(backendParam)) {
