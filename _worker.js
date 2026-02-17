@@ -2920,7 +2920,20 @@ var src_default = {
     const url = new URL(request.url);
     const host = url.origin;
     const frontendUrl = 'https://raw.githubusercontent.com/aylz10/psub/main/index.html';
-    const SUB_BUCKET = env.SUB_BUCKET;
+    
+    // 兼容 Cloudflare Workers (R2/KV) 和 Vercel/Node.js
+    // Cloudflare: env.SUB_BUCKET, Vercel: 使用内存缓存
+    let SUB_BUCKET = null;
+    let useMemoryCache = false;
+    const memoryCache = new Map(); // Vercel 内存缓存
+    
+    if (env.SUB_BUCKET) {
+      // Cloudflare Workers - 使用 R2/KV
+      SUB_BUCKET = env.SUB_BUCKET;
+    } else {
+      // Vercel/其他平台 - 使用内存缓存
+      useMemoryCache = true;
+    }
     
     // 检查 BACKEND 配置
     if (!env.BACKEND) {
@@ -2929,7 +2942,7 @@ var src_default = {
     }
     
     let backend = env.BACKEND.replace(/(https?:\/\/[^/]+).*$/, "$1");
-    console.log('[psub] 初始后端地址:', backend);
+    console.log('[psub] 初始后端地址:', backend, '| 内存缓存:', useMemoryCache);
     const subDir = "subscription";
     const pathSegments = url.pathname.split("/").filter((segment) => segment.length > 0);
     const urlParam = url.searchParams.get("url");
@@ -2954,11 +2967,22 @@ var src_default = {
     } else if (pathSegments[0] === subDir) {
       // 访问 /subscription/{key} 获取存储的订阅内容
       const key = pathSegments[pathSegments.length - 1];
-      const object = await SUB_BUCKET.get(key);
-      const object_headers = await SUB_BUCKET.get(key + "_headers");
-      if (object === null)
+      
+      let object, object_headers;
+      if (useMemoryCache) {
+        // Vercel 内存缓存
+        object = memoryCache.get(key);
+        object_headers = memoryCache.get(key + "_headers");
+      } else {
+        // Cloudflare R2/KV
+        object = await SUB_BUCKET.get(key);
+        object_headers = await SUB_BUCKET.get(key + "_headers");
+      }
+      
+      if (!object)
         return new Response("Not Found", { status: 404 });
-      if ("R2Bucket" === SUB_BUCKET.constructor.name) {
+      
+      if (!useMemoryCache && "R2Bucket" === SUB_BUCKET.constructor.name) {
         const headers = object_headers ? new Headers(await object_headers.json()) : new Headers({ "Content-Type": "text/plain;charset=UTF-8" });
         return new Response(object.body, { headers });
       } else {
@@ -3061,12 +3085,20 @@ var src_default = {
           }
           
           // 存储原始响应头（所有格式都存储）
-          await SUB_BUCKET.put(key + "_headers", JSON.stringify(Object.fromEntries(response.headers)));
+          if (useMemoryCache) {
+            memoryCache.set(key + "_headers", JSON.stringify(Object.fromEntries(response.headers)));
+          } else {
+            await SUB_BUCKET.put(key + "_headers", JSON.stringify(Object.fromEntries(response.headers)));
+          }
           
           // 如果格式无法识别，直接存储原始内容
           if (parsedObj.format === "unknown") {
             console.log('[psub] HTTP订阅格式未知，直接存储原始内容');
-            await SUB_BUCKET.put(key, plaintextData);
+            if (useMemoryCache) {
+              memoryCache.set(key, plaintextData);
+            } else {
+              await SUB_BUCKET.put(key, plaintextData);
+            }
             keys.push(key);
             replacedURIs.push(`${host}/${subDir}/${key}`);
             console.log('[psub] 未知格式HTTP内容已存储:', `${host}/${subDir}/${key}`);
@@ -3078,7 +3110,11 @@ var src_default = {
           // 兜底处理：如果HTTP获取的内容无法识别为任何已知格式，直接存储原始内容
           if (!parsedObj || parsedObj.format === "unknown" || !parsedObj.data) {
             console.log('[psub] HTTP订阅无法解析为base64/yaml，直接存储原始响应');
-            await SUB_BUCKET.put(key, plaintextData);
+            if (useMemoryCache) {
+              memoryCache.set(key, plaintextData);
+            } else {
+              await SUB_BUCKET.put(key, plaintextData);
+            }
             keys.push(key);
             replacedURIs.push(`${host}/${subDir}/${key}`);
             console.log('[psub] HTTP原始内容已存储(兜底):', `${host}/${subDir}/${key}`);
@@ -3160,7 +3196,11 @@ var src_default = {
             console.error('[psub] 混淆后无有效节点:', url2);
             // 如果全部失败，尝试存储原始内容
             console.log('[psub] 尝试存储原始base64内容');
-            await SUB_BUCKET.put(key, utf8ToBase64(parsedObj.data));
+            if (useMemoryCache) {
+              memoryCache.set(key, utf8ToBase64(parsedObj.data));
+            } else {
+              await SUB_BUCKET.put(key, utf8ToBase64(parsedObj.data));
+            }
             keys.push(key);
             replacedURIs.push(`${host}/${subDir}/${key}`);
             console.log('[psub] 原始base64内容已存储:', `${host}/${subDir}/${key}`);
@@ -3169,7 +3209,11 @@ var src_default = {
           
           const replacedBase64Data = utf8ToBase64(newLinks.join("\r\n"));
           if (replacedBase64Data) {
-            await SUB_BUCKET.put(key, replacedBase64Data);
+            if (useMemoryCache) {
+              memoryCache.set(key, replacedBase64Data);
+            } else {
+              await SUB_BUCKET.put(key, replacedBase64Data);
+            }
             keys.push(key);
             replacedURIs.push(`${host}/${subDir}/${key}`);
             console.log('[psub] base64内容已混淆存储:', `${host}/${subDir}/${key}`);
@@ -3186,7 +3230,11 @@ var src_default = {
           
           const replacedYAMLData = replaceYAML(parsedObj.data, replacements);
           if (replacedYAMLData) {
-            await SUB_BUCKET.put(key, replacedYAMLData);
+            if (useMemoryCache) {
+              memoryCache.set(key, replacedYAMLData);
+            } else {
+              await SUB_BUCKET.put(key, replacedYAMLData);
+            }
             keys.push(key);
             replacedURIs.push(`${host}/${subDir}/${key}`);
             console.log('[psub] yaml内容已混淆存储:', `${host}/${subDir}/${key}`);
@@ -3195,7 +3243,11 @@ var src_default = {
         // 对于HTTP URL获取的未知格式，直接存储原始内容
         else if (url2.startsWith("https://") || url2.startsWith("http://")) {
           console.log('[psub] HTTP订阅内容格式未知，直接存储:', parsedObj.format);
-          await SUB_BUCKET.put(key, plaintextData);
+          if (useMemoryCache) {
+            memoryCache.set(key, plaintextData);
+          } else {
+            await SUB_BUCKET.put(key, plaintextData);
+          }
           keys.push(key);
           replacedURIs.push(`${host}/${subDir}/${key}`);
           console.log('[psub] HTTP内容已存储:', `${host}/${subDir}/${key}`);
@@ -3293,7 +3345,11 @@ var src_default = {
         );
         // 清理临时数据
         for (const key of keys) {
-          await SUB_BUCKET.delete(key).catch(() => {});
+          if (useMemoryCache) {
+              memoryCache.delete(key);
+            } else {
+              await SUB_BUCKET.delete(key).catch(() => {});
+            }
         }
         return new Response(result, {
           status: 200,
@@ -3321,7 +3377,11 @@ var src_default = {
         const replacedBase64Data = utf8ToBase64(newLinks.join("\r\n"));
         // 清理临时数据
         for (const key of keys) {
-          await SUB_BUCKET.delete(key).catch(() => {});
+          if (useMemoryCache) {
+              memoryCache.delete(key);
+            } else {
+              await SUB_BUCKET.delete(key).catch(() => {});
+            }
         }
         return new Response(replacedBase64Data, {
           status: 200,
@@ -3338,7 +3398,11 @@ var src_default = {
         );
         // 清理临时数据
         for (const key of keys) {
-          await SUB_BUCKET.delete(key).catch(() => {});
+          if (useMemoryCache) {
+              memoryCache.delete(key);
+            } else {
+              await SUB_BUCKET.delete(key).catch(() => {});
+            }
         }
         return new Response(result, {
           status: 200,
@@ -3355,7 +3419,11 @@ var src_default = {
     console.error('[psub] 后端错误响应:', rpResponse.status, errorText.substring(0, 500));
     // 清理临时数据
     for (const key of keys) {
-      await SUB_BUCKET.delete(key).catch(() => {});
+      if (useMemoryCache) {
+              memoryCache.delete(key);
+            } else {
+              await SUB_BUCKET.delete(key).catch(() => {});
+            }
     }
     return new Response(
       `Backend error: ${rpResponse.status} ${rpResponse.statusText}\n\n${errorText.substring(0, 1000)}`,
@@ -3364,7 +3432,11 @@ var src_default = {
     } catch (globalError) {
       // 清理存储的临时数据
       for (const key of keys) {
-        await SUB_BUCKET.delete(key).catch(() => {});
+        if (useMemoryCache) {
+              memoryCache.delete(key);
+            } else {
+              await SUB_BUCKET.delete(key).catch(() => {});
+            }
       }
       console.error('[psub] 全局错误:', globalError);
       return new Response(
