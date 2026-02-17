@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "/_worker.js"
+    }
+  ],
+  "functions": {
+    "_worker.js": {
+      "runtime": "edge",
+      "maxDuration": 30
+    }
+  }
+}
