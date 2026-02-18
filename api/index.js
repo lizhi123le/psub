@@ -176,7 +176,13 @@ async function forwardToBackend(request, url, backend, host, subDir) {
       return new Response(`Backend error: ${response.status}`, { status: response.status });
     }
 
-    let content = await response.text();
+    // Read response as bytes and decode manually
+    const buffer = await response.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    let content = '';
+    for (let i = 0; i < bytes.length; i++) {
+      content += String.fromCharCode(bytes[i]);
+    }
     
     // Get current host without protocol for domain-only replacement
     const currentHost = url.host;
@@ -222,18 +228,6 @@ export default async function handler(request) {
 
   // Version endpoint
   if (url.pathname === '/version') {
-    // Return cached version if available
-    if (cachedVersion) {
-      return new Response(cachedVersion, {
-        status: 200,
-        headers: {
-          'Content-Type': 'text/plain; charset=utf-8',
-          'Access-Control-Allow-Origin': '*'
-        }
-      });
-    }
-    
-    // Try to fetch version from backend
     try {
       const backend = BACKEND.replace(/(https?:\/\/[^/]+).*$/, "$1");
       const response = await fetch(`${backend}/version`, {
@@ -245,8 +239,7 @@ export default async function handler(request) {
       if (response.ok) {
         const text = await response.text();
         if (text && text.trim().length > 1) {
-          cachedVersion = text.trim();
-          return new Response(cachedVersion, {
+          return new Response(text.trim(), {
             status: 200,
             headers: {
               'Content-Type': 'text/plain; charset=utf-8',
@@ -255,18 +248,25 @@ export default async function handler(request) {
           });
         }
       }
+      
+      // If response not ok, return error with backend info
+      return new Response(`Error: Backend returned ${response.status}`, {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Access-Control-Allow-Origin': '*'
+        }
+      });
     } catch (e) {
       console.error('Version fetch error:', e);
+      return new Response(`Error: ${e.message}`, {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Access-Control-Allow-Origin': '*'
+        }
+      });
     }
-    
-    // Fallback to hardcoded version
-    return new Response('subconverter v1.9.9 TG@feiyangdigital backend', {
-      status: 200,
-      headers: {
-        'Content-Type': 'text/plain; charset=utf-8',
-        'Access-Control-Allow-Origin': '*'
-      }
-    });
   }
 
   // Subscription content endpoint
