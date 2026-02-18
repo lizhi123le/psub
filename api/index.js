@@ -175,9 +175,12 @@ async function forwardToBackend(request, url, backend, host, subDir) {
 
     let content = await response.text();
     
+    // Get current host without protocol for domain-only replacement
+    const currentHost = url.host;
+    
     // Replace bulianglin2023.dev with current host in the content
     content = content.replace(/https:\/\/bulianglin2023\.dev/g, host);
-    content = content.replace(/bulianglin2023\.dev/g, url.host);
+    content = content.replace(/bulianglin2023\.dev/g, currentHost);
     
     // Also replace any other known backend domains
     content = content.replace(/https:\/\/api\.v1\.mk/g, host);
