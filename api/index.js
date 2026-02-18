@@ -176,13 +176,10 @@ async function forwardToBackend(request, url, backend, host, subDir) {
       return new Response(`Backend error: ${response.status}`, { status: response.status });
     }
 
-    // Read response as bytes and decode manually
+    // Read response as bytes and decode with UTF-8 support
     const buffer = await response.arrayBuffer();
-    const bytes = new Uint8Array(buffer);
-    let content = '';
-    for (let i = 0; i < bytes.length; i++) {
-      content += String.fromCharCode(bytes[i]);
-    }
+    const decoder = new TextDecoder('utf-8');
+    let content = decoder.decode(buffer);
     
     // Get current host without protocol for domain-only replacement
     const currentHost = url.host;
@@ -193,6 +190,7 @@ async function forwardToBackend(request, url, backend, host, subDir) {
     
     // Also replace any other known backend domains
     content = content.replace(/https:\/\/api\.v1\.mk/g, host);
+    content = content.replace(/api\.v1\.mk/g, currentHost);
 
     return new Response(content, {
       status: 200,
@@ -220,9 +218,13 @@ export default async function handler(request) {
       if (response.ok) {
         let html = await response.text();
         
-        // Replace bulianglin2023.dev with current host
+        // Replace bulianglin2023.dev with current host - handle multiple formats
+        // Format 1: https://bulianglin2023.dev
         html = html.replace(/https:\/\/bulianglin2023\.dev/g, host);
+        // Format 2: bulianglin2023.dev (without protocol)
         html = html.replace(/bulianglin2023\.dev/g, url.host);
+        // Format 3: URL encoded version
+        html = html.replace(/https%3A%2F%2Fbulianglin2023\.dev/g, encodeURIComponent(host));
         
         return new Response(html, {
           headers: { 'Content-Type': 'text/html; charset=utf-8' }
