@@ -10,6 +10,9 @@ const BACKEND = process.env.BACKEND || 'https://api.v1.mk';
 // Memory cache for Vercel (since Vercel doesn't support R2/KV like Cloudflare)
 const memoryCache = new Map();
 
+// Cached version string
+let cachedVersion = null;
+
 function generateRandomStr(len) {
   const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
   let result = '';
@@ -208,39 +211,9 @@ export default async function handler(request) {
 
   // Version endpoint
   if (url.pathname === '/version') {
-    try {
-      const backend = BACKEND.replace(/(https?:\/\/[^/]+).*$/, "$1");
-      
-      // Fetch backend version
-      const response = await fetch(`${backend}/version`, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      // Get response body as text
-      const versionText = await response.text();
-      
-      // Return version or fallback
-      const finalText = versionText && versionText.trim() 
-        ? versionText.trim() 
-        : 'subconverter backend (version unknown)';
-
-      return new Response(finalText, {
-        status: 200,
-        headers: {
-          'Content-Type': 'text/plain; charset=utf-8',
-          'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'no-store'
-        }
-      });
-    } catch (e) {
-      // Return fallback version on error
-      return new Response('subconverter backend (fetch error)', {
+    // Return cached version if available
+    if (cachedVersion) {
+      return new Response(cachedVersion, {
         status: 200,
         headers: {
           'Content-Type': 'text/plain; charset=utf-8',
@@ -248,6 +221,41 @@ export default async function handler(request) {
         }
       });
     }
+    
+    // Try to fetch version from backend
+    try {
+      const backend = BACKEND.replace(/(https?:\/\/[^/]+).*$/, "$1");
+      const response = await fetch(`${backend}/version`, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0'
+        }
+      });
+
+      if (response.ok) {
+        const text = await response.text();
+        if (text && text.trim().length > 1) {
+          cachedVersion = text.trim();
+          return new Response(cachedVersion, {
+            status: 200,
+            headers: {
+              'Content-Type': 'text/plain; charset=utf-8',
+              'Access-Control-Allow-Origin': '*'
+            }
+          });
+        }
+      }
+    } catch (e) {
+      console.error('Version fetch error:', e);
+    }
+    
+    // Fallback to hardcoded version
+    return new Response('subconverter v1.9.9 TG@feiyangdigital backend', {
+      status: 200,
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Access-Control-Allow-Origin': '*'
+      }
+    });
   }
 
   // Subscription content endpoint
