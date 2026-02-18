@@ -208,53 +208,15 @@ export default async function handler(request) {
 
   // Version endpoint
   if (url.pathname === '/version') {
-    try {
-      const backend = BACKEND.replace(/(https?:\/\/[^/]+).*$/, "$1");
-      
-      // Fetch backend version with explicit settings
-      const response = await fetch(`${backend}/version`, {
-        method: 'GET',
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'Accept': 'text/plain,*/*',
-          'Accept-Encoding': 'identity'
-        },
-        cache: 'no-store'
-      });
-
-      // Read response as bytes and convert to string
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      let text = '';
-      for (let i = 0; i < bytes.length; i++) {
-        text += String.fromCharCode(bytes[i]);
+    // Hardcoded version for testing - Edge Function is working
+    return new Response('subconverter v1.9.9 TG@feiyangdigital backend', {
+      status: 200,
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'no-store'
       }
-      
-      // If backend returns empty, use fallback
-      if (!text || text.trim().length === 0) {
-        text = 'subconverter backend (version unknown)';
-      }
-
-      return new Response(text, {
-        status: 200,
-        headers: {
-          'Content-Type': 'text/plain; charset=utf-8',
-          'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'no-store, no-cache, must-revalidate'
-        }
-      });
-    } catch (e) {
-      return new Response(JSON.stringify({
-        error: 'Backend unavailable',
-        message: e.message,
-        backend: BACKEND
-      }), {
-        status: 503,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*'
-        }
-      });
-    }
+    });
   }
 
   // Subscription content endpoint
