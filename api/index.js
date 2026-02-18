@@ -68,13 +68,19 @@ async function processSubscription(request, url, backend) {
   const host = getHost(request);
   const subDir = 'subscription';
   const targetUrl = url.searchParams.get('url');
+  const target = url.searchParams.get('target');
 
   if (!targetUrl) {
     return new Response('Missing url parameter', { status: 400 });
   }
 
+  // If there's a target parameter (like 'clash'), forward to backend for conversion first
+  if (target) {
+    return await forwardToBackend(request, url, backend, host, subDir);
+  }
+
+  // Original logic for non-target requests
   const replacedURIs = [];
-  const keys = [];
   const urlParts = targetUrl.split('|').filter(part => part.trim() !== '');
 
   if (urlParts.length === 0) {
@@ -85,7 +91,6 @@ async function processSubscription(request, url, backend) {
     const key = generateRandomStr(16);
 
     if (urlPart.startsWith('https://') || urlPart.startsWith('http://')) {
-      // Fetch subscription from URL
       try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 20000);
@@ -101,39 +106,24 @@ async function processSubscription(request, url, backend) {
 
         clearTimeout(timeoutId);
 
-        if (!response.ok) {
-          continue;
-        }
+        if (!response.ok) continue;
 
         const content = await response.text();
-        if (!content || content.trim().length === 0) {
-          continue;
-        }
+        if (!content || content.trim().length === 0) continue;
 
-        // Parse the content
         const parsed = parseData(content);
-
-        // Store headers
         const headers = Object.fromEntries(response.headers);
         memoryCache.set(key + '_headers', JSON.stringify(headers));
 
         if (parsed.format === 'base64') {
-          // Handle base64 format
           const links = parsed.data.split(/\r?\n/).filter(link => link.trim() !== '');
-
           for (const link of links) {
             const nodeKey = generateRandomStr(16);
             memoryCache.set(nodeKey, link);
             memoryCache.set(nodeKey + '_headers', JSON.stringify({ 'Content-Type': 'text/plain' }));
             replacedURIs.push(`${host}/${subDir}/${nodeKey}`);
           }
-        } else if (parsed.format === 'yaml') {
-          // Handle YAML format - store as-is for now
-          memoryCache.set(key, content);
-          memoryCache.set(key + '_headers', JSON.stringify({ 'Content-Type': 'text/plain;charset=UTF-8' }));
-          replacedURIs.push(`${host}/${subDir}/${key}`);
         } else {
-          // Unknown format - store as-is
           memoryCache.set(key, content);
           memoryCache.set(key + '_headers', JSON.stringify({ 'Content-Type': 'text/plain;charset=UTF-8' }));
           replacedURIs.push(`${host}/${subDir}/${key}`);
@@ -143,43 +133,19 @@ async function processSubscription(request, url, backend) {
         continue;
       }
     } else if (/^(ssr?|vmess1?|trojan|vless|hysteria|hysteria2|tg):\/\//.test(urlPart)) {
-      // Direct node link - store it
       memoryCache.set(key, urlPart);
       memoryCache.set(key + '_headers', JSON.stringify({ 'Content-Type': 'text/plain' }));
       replacedURIs.push(`${host}/${subDir}/${key}`);
-    } else {
-      // Try to parse as base64 encoded content
-      try {
-        const decoded = atob(urlPart.replace(/\s/g, ''));
-        const parsed = parseData(decoded);
-
-        if (parsed.format === 'base64') {
-          const links = parsed.data.split(/\r?\n/).filter(link => link.trim() !== '');
-
-          for (const link of links) {
-            const nodeKey = generateRandomStr(16);
-            memoryCache.set(nodeKey, link);
-            memoryCache.set(nodeKey + '_headers', JSON.stringify({ 'Content-Type': 'text/plain' }));
-            replacedURIs.push(`${host}/${subDir}/${nodeKey}`);
-          }
-        }
-      } catch (e) {
-        // Not valid base64, store as-is
-        memoryCache.set(key, urlPart);
-        memoryCache.set(key + '_headers', JSON.stringify({ 'Content-Type': 'text/plain' }));
-        replacedURIs.push(`${host}/${subDir}/${key}`);
-      }
     }
   }
 
   if (replacedURIs.length === 0) {
-    return new Response('Error: All subscription links are invalid or returned empty content.', {
+    return new Response('Error: All subscription links are invalid or returned empty content.', { 
       status: 400,
       headers: { 'Content-Type': 'text/plain' }
     });
   }
 
-  // Return the replaced URIs as base64
   const result = btoa(replacedURIs.join('\r\n'));
   return new Response(result, {
     headers: {
@@ -187,6 +153,45 @@ async function processSubscription(request, url, backend) {
       'Access-Control-Allow-Origin': '*',
     }
   });
+}
+
+// Forward to backend for conversion, then replace domain
+async function forwardToBackend(request, url, backend, host, subDir) {
+  try {
+    // Build backend URL with all parameters
+    const backendUrl = `${backend}${url.pathname}${url.search}`;
+    
+    const response = await fetch(backendUrl, {
+      method: 'GET',
+      headers: {
+        'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/plain,*/*',
+      }
+    });
+
+    if (!response.ok) {
+      return new Response(`Backend error: ${response.status}`, { status: response.status });
+    }
+
+    let content = await response.text();
+    
+    // Replace bulianglin2023.dev with current host in the content
+    content = content.replace(/https:\/\/bulianglin2023\.dev/g, host);
+    content = content.replace(/bulianglin2023\.dev/g, url.host);
+    
+    // Also replace any other known backend domains
+    content = content.replace(/https:\/\/api\.v1\.mk/g, host);
+
+    return new Response(content, {
+      status: 200,
+      headers: {
+        'Content-Type': response.headers.get('Content-Type') || 'text/plain',
+        'Access-Control-Allow-Origin': '*',
+      }
+    });
+  } catch (e) {
+    return new Response(`Error forwarding to backend: ${e.message}`, { status: 500 });
+  }
 }
 
 export default async function handler(request) {
