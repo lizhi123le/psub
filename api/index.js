@@ -162,7 +162,7 @@ async function forwardToBackend(request, url, backend, host, subDir) {
     const backendUrl = `${backend}${url.pathname}${url.search}`;
     
     // Debug: return the URL being fetched
-    return new Response(`Debug: ${backendUrl}`, { status: 200 });
+    // return new Response(`Debug: ${backendUrl}`, { status: 200 });
     
     const response = await fetch(backendUrl, {
       method: 'GET',
