@@ -2,6 +2,8 @@
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/index.js" },
     { "source": "/version", "destination": "/api/index.js" },
-    { "source": "/sub(.*)", "destination": "/api/index.js" }
+    { "source": "/sub(.*)", "destination": "/api/index.js" },
+    { "source": "/subscription/(.*)", "destination": "/api/index.js" },
+    { "source": "/", "destination": "/api/index.js" }
   ]
 }
