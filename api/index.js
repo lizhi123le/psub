@@ -210,8 +210,29 @@ export default async function handler(request) {
   const url = new URL(request.url);
   const host = getHost(request);
 
-  // Root - return simple info
+  // Root - return index.html with domain replacement
   if (url.pathname === '/' || url.pathname === '') {
+    try {
+      // In Edge Function, we need to fetch the index.html from the same origin
+      const indexUrl = `${host}/index.html`;
+      const response = await fetch(indexUrl);
+      
+      if (response.ok) {
+        let html = await response.text();
+        
+        // Replace bulianglin2023.dev with current host
+        html = html.replace(/https:\/\/bulianglin2023\.dev/g, host);
+        html = html.replace(/bulianglin2023\.dev/g, url.host);
+        
+        return new Response(html, {
+          headers: { 'Content-Type': 'text/html; charset=utf-8' }
+        });
+      }
+    } catch (e) {
+      console.error('Error loading index.html:', e);
+    }
+    
+    // Fallback to simple page
     return new Response(`<!DOCTYPE html>
 <html>
 <head><title>psub</title></head>
