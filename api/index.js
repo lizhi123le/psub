@@ -216,17 +216,21 @@ export default async function handler(request) {
       const response = await fetch(`${backend}/version`, {
         signal: controller.signal,
         headers: {
-          'User-Agent': 'Mozilla/5.0'
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
       });
 
       clearTimeout(timeoutId);
-      const text = await response.text();
+      
+      // Use arrayBuffer for reliable reading in Edge Function
+      const buffer = await response.arrayBuffer();
+      const text = new TextDecoder().decode(buffer);
 
       return new Response(text, {
         headers: {
-          'Content-Type': response.headers.get('Content-Type') || 'text/plain',
-          'Access-Control-Allow-Origin': '*'
+          'Content-Type': 'text/plain',
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'no-cache'
         }
       });
     } catch (e) {
