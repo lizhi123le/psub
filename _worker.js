@@ -2919,7 +2919,7 @@ var src_default = {
     try {
     const url = new URL(request.url);
     const host = url.origin;
-    const frontendUrl = 'https://raw.githubusercontent.com/aylz10/psub/main/index.html';
+    const frontendUrl = 'https://raw.githubusercontent.com/lizhi123le/psub/refs/heads/main/index.html';
     
     // 兼容 Cloudflare Workers (R2/KV) 和 Vercel/Node.js
     // Cloudflare: env.SUB_BUCKET, Vercel: 使用内存缓存
