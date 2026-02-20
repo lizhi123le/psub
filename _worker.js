@@ -2957,16 +2957,24 @@ var src_default = {
         return new Response('Failed to fetch frontend', { status: response.status });
       }
       const originalHtml = await response.text();
-      // Replace bulianglin2023.dev with current host - handle multiple formats
-      // Format 1: https://bulianglin2023.dev
-      let modifiedHtml = originalHtml.replace(/https:\/\/bulianglin2023\.dev/g, host);
-      // Format 2: bulianglin2023.dev (without protocol)
-      modifiedHtml = modifiedHtml.replace(/bulianglin2023\.dev/g, url.host);
-      // Format 3: URL encoded version
-      modifiedHtml = modifiedHtml.replace(/https%3A%2F%2Fbulianglin2023\.dev/g, encodeURIComponent(host));
-      // Also replace api.v1.mk backend domain
-      modifiedHtml = modifiedHtml.replace(/https:\/\/api\.v1\.mk/g, host);
-      modifiedHtml = modifiedHtml.replace(/api\.v1\.mk/g, url.host);
+      
+      // 检测是否为 Vercel 部署环境 (使用内存缓存且不是 Cloudflare Workers)
+      const isVercel = useMemoryCache && !env.SUB_BUCKET;
+      
+      // 仅在 Vercel 部署时替换域名
+      let modifiedHtml = originalHtml;
+      if (isVercel) {
+        // Replace bulianglin2023.dev with current host - handle multiple formats
+        // Format 1: https://bulianglin2023.dev
+        modifiedHtml = modifiedHtml.replace(/https:\/\/bulianglin2023\.dev/g, host);
+        // Format 2: bulianglin2023.dev (without protocol)
+        modifiedHtml = modifiedHtml.replace(/bulianglin2023\.dev/g, url.host);
+        // Format 3: URL encoded version
+        modifiedHtml = modifiedHtml.replace(/https%3A%2F%2Fbulianglin2023\.dev/g, encodeURIComponent(host));
+        // Also replace api.v1.mk backend domain
+        modifiedHtml = modifiedHtml.replace(/https:\/\/api\.v1\.mk/g, host);
+        modifiedHtml = modifiedHtml.replace(/api\.v1\.mk/g, url.host);
+      }
       return new Response(modifiedHtml, {
         status: 200,
         headers: {
