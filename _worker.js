@@ -3381,7 +3381,8 @@ var src_default = {
         return new Response(result, {
           status: 200,
           headers: {
-            'Content-Type': target === 'singbox' ? 'application/json; charset=utf-8' : 'application/x-yaml; charset=utf-8',
+            'Content-Type': target === 'singbox' ? 'application/json; charset=utf-8' : 'text/plain; charset=utf-8',
+            'Content-Disposition': 'inline',
             'Access-Control-Allow-Origin': '*',
           }
         });
@@ -3435,6 +3436,7 @@ var src_default = {
           status: 200,
           headers: {
             'Content-Type': rpResponse.headers.get('Content-Type') || 'text/plain; charset=utf-8',
+            'Content-Disposition': 'inline',
             'Access-Control-Allow-Origin': '*',
           }
         });
