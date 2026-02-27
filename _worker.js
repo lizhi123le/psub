@@ -4328,6 +4328,7 @@ var src_default = {
             status: 200,
             headers: {
               "Content-Type": "text/plain; charset=utf-8",
+              "Content-Disposition": "inline",
               "Access-Control-Allow-Origin": "*",
             },
           });
