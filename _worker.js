@@ -4287,7 +4287,7 @@ var src_default = {
             status: 200,
             headers: {
               "Content-Type":
-                target === "singbox"
+                target === "clash" || target === "singbox"
                   ? "text/plain; charset=utf-8"
                   : "application/x-yaml; charset=utf-8",
               "Content-Disposition": "inline",
