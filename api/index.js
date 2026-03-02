@@ -435,8 +435,8 @@ export default async function handler(request) {
   // Home page handler
   if (url.pathname === '/' || url.pathname === '/index.html') {
     try {
-      const indexUrl = new URL('./index.html', import.meta.url);
-      const res = await fetch(indexUrl);
+      const frontendUrl = "https://raw.githubusercontent.com/lizhi123le/psub/refs/heads/main/index.html";
+      const res = await fetch(frontendUrl);
       if (res.ok) {
         let html = await res.text();
         html = html.replace(/https:\/\/bulianglin2023\.dev/g, host);
