@@ -3697,7 +3697,45 @@ var src_default = {
       const pathSegments = url.pathname
         .split("/")
         .filter((segment) => segment.length > 0);
-      const urlParam = url.searchParams.get("url");
+
+      // Robustly extract 'url' parameter from raw query string to avoid truncation by internal '&'
+      function getFullUrl(requestUrl) {
+        const u = new URL(requestUrl);
+        const search = u.search;
+        if (!search || !search.includes('url=')) return u.searchParams.get('url');
+
+        const psubParams = ['target=', 'config=', 'emoji=', 'list=', 'udp=', 'tfo=', 'scv=', 'fdn=', 'sort=', 'dev=', 'bd='];
+        let searchStr = search.substring(1);
+        let parts = searchStr.split('&');
+        let urlValue = "";
+        let startIndex = -1;
+
+        for (let i = 0; i < parts.length; i++) {
+          if (parts[i].startsWith('url=')) {
+            startIndex = i;
+            urlValue = parts[i].substring(4);
+            break;
+          }
+        }
+
+        if (startIndex === -1) return u.searchParams.get('url');
+
+        for (let i = startIndex + 1; i < parts.length; i++) {
+          let isPsubParam = false;
+          for (const p of psubParams) {
+            if (parts[i].startsWith(p)) {
+              isPsubParam = true;
+              break;
+            }
+          }
+          if (isPsubParam) break;
+          urlValue += '&' + parts[i];
+        }
+
+        return decodeURIComponent(urlValue);
+      }
+
+      const urlParam = getFullUrl(request.url);
 
       // 优先检查是否有 url 参数（订阅转换）
       if (urlParam) {

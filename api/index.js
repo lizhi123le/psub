@@ -64,6 +64,43 @@ function utf8ToBase64(str) {
   return btoa(unescape(encodeURIComponent(str)));
 }
 
+// Robustly extract 'url' parameter from raw query string to avoid truncation by internal '&'
+function getFullUrl(requestUrl) {
+  const url = new URL(requestUrl);
+  const search = url.search;
+  if (!search || !search.includes('url=')) return url.searchParams.get('url');
+
+  const psubParams = ['target=', 'config=', 'emoji=', 'list=', 'udp=', 'tfo=', 'scv=', 'fdn=', 'sort=', 'dev=', 'bd='];
+  let searchStr = search.substring(1);
+  let parts = searchStr.split('&');
+  let urlValue = "";
+  let startIndex = -1;
+
+  for (let i = 0; i < parts.length; i++) {
+    if (parts[i].startsWith('url=')) {
+      startIndex = i;
+      urlValue = parts[i].substring(4);
+      break;
+    }
+  }
+
+  if (startIndex === -1) return url.searchParams.get('url');
+
+  for (let i = startIndex + 1; i < parts.length; i++) {
+    let isPsubParam = false;
+    for (const p of psubParams) {
+      if (parts[i].startsWith(p)) {
+        isPsubParam = true;
+        break;
+      }
+    }
+    if (isPsubParam) break;
+    urlValue += '&' + parts[i];
+  }
+
+  return decodeURIComponent(urlValue);
+}
+
 // Parse subscription data format
 function parseData(data) {
   if (data.includes("proxies:")) return { format: "yaml", data: data };
@@ -254,7 +291,7 @@ function getHost(request) {
 async function processSubscription(request, url, backend) {
   const host = getHost(request);
   const subDir = 'subscription';
-  const targetUrl = url.searchParams.get('url');
+  const targetUrl = getFullUrl(request.url);
   const target = url.searchParams.get('target');
 
   if (!targetUrl) {
