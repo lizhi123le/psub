@@ -328,7 +328,7 @@ async function processSubscription(request, url, backend) {
 
   // If there's a target parameter, forward to backend for conversion
   if (target) {
-    return await forwardToBackend(request, url, backend, host, subDir, replacements, keys);
+    return await forwardToBackend(request, url, backend, host, subDir, replacements, keys, replacedURIs);
   }
 
   const result = utf8ToBase64(replacedURIs.join('\r\n'));
@@ -341,9 +341,9 @@ async function processSubscription(request, url, backend) {
 }
 
 // Forward to backend for conversion, then restore original node details
-async function forwardToBackend(request, url, backend, host, subDir, replacements, keys) {
+async function forwardToBackend(request, url, backend, host, subDir, replacements, keys, replacedURIs) {
   try {
-    const newUrl = (memoryCache.keys ? Array.from(memoryCache.keys()) : []).filter(k => !k.endsWith('_headers')).map(k => `${host}/${subDir}/${k}`).join('|');
+    const newUrl = replacedURIs.join('|');
     const originalParams = new URL(request.url).searchParams;
     originalParams.set('url', newUrl);
     
