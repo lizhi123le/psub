@@ -3747,6 +3747,39 @@ var src_default = {
         return decodeURIComponent(finalUrl);
       }
 
+      // 内部临时订阅端点 (Stateless Proxy support)
+      if (url.pathname.includes(`/${subDir}/B64_`)) {
+        const key = url.pathname.split("/").pop();
+        if (key && key.startsWith("B64_")) {
+          try {
+            const encoded = key.substring(4);
+            const padded = encoded + '='.repeat((4 - (encoded.length % 4)) % 4);
+            const originalUrl = atob(padded.replace(/-/g, '+').replace(/_/g, '/'));
+            
+            const response = await fetch(originalUrl, {
+              headers: {
+                'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+              }
+            });
+
+            if (!response.ok) {
+              return new Response(`Error fetching subscription: ${response.status}`, { status: response.status });
+            }
+
+            const content = await response.text();
+            const responseHeaders = new Headers(response.headers);
+            responseHeaders.set('Access-Control-Allow-Origin', '*');
+            
+            return new Response(content, {
+              status: 200,
+              headers: responseHeaders
+            });
+          } catch (e) {
+            return new Response(`Error: ${e.message}`, { status: 500 });
+          }
+        }
+      }
+
       const urlParam = getFullUrl(request.url);
 
       // 优先检查是否有 url 参数（订阅转换）
@@ -3854,6 +3887,13 @@ var src_default = {
           return new Response("There are no valid links", { status: 400 });
         let response, parsedObj, plaintextData;
         for (const url2 of urlParts) {
+          if (url2.startsWith("https://") || url2.startsWith("http://")) {
+            // Stateless Proxy: Encode the URL into the path to avoid cache-miss (404/400)
+            const encodedUrl = btoa(url2).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+            replacedURIs.push(`${url.origin}/${subDir}/B64_${encodedUrl}`);
+            continue;
+          }
+          
           const key = generateRandomStr(16);
           if (url2.startsWith("https://") || url2.startsWith("http://")) {
             console.log("[psub] 获取订阅:", url2);

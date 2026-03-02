@@ -335,9 +335,16 @@ async function processSubscription(request, url, backend) {
   }
 
   for (const urlPart of urlPartList) {
+    if (urlPart.startsWith('https://') || urlPart.startsWith('http://')) {
+      // Stateless Proxy: Encode the URL into the path to avoid Vercel edge cache-miss (404/400)
+      // We use 'B64_' prefix to identify encoded URLs
+      const encodedUrl = btoa(urlPart).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      replacedURIs.push(`${host}/${subDir}/B64_${encodedUrl}`);
+      continue;
+    }
+
     const key = generateRandomStr(16);
     let plaintextData = "";
-    let responseHeaders = {};
 
     if (urlPart.startsWith('https://') || urlPart.startsWith('http://')) {
       try {
@@ -577,6 +584,36 @@ export default async function handler(request) {
 
     if (!key || key.includes('/') || key.includes('..')) {
       return new Response('Invalid key', { status: 400 });
+    }
+
+    // Handle Stateless Proxy
+    if (key.startsWith('B64_')) {
+      try {
+        const encoded = key.substring(4);
+        const padded = encoded + '='.repeat((4 - (encoded.length % 4)) % 4);
+        const originalUrl = atob(padded.replace(/-/g, '+').replace(/_/g, '/'));
+        
+        const response = await fetch(originalUrl, {
+          headers: {
+            'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          }
+        });
+
+        if (!response.ok) {
+          return new Response(`Error fetching subscription: ${response.status}`, { status: response.status });
+        }
+
+        const content = await response.text();
+        const responseHeaders = new Headers(response.headers);
+        responseHeaders.set('Access-Control-Allow-Origin', '*');
+        
+        return new Response(content, {
+          status: 200,
+          headers: responseHeaders
+        });
+      } catch (e) {
+        return new Response(`Error: ${e.message}`, { status: 500 });
+      }
     }
 
     const content = memoryCache.get(key);
