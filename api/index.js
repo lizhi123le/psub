@@ -7,24 +7,37 @@ export const config = {
 // Environment - set BACKEND in Vercel dashboard
 const BACKEND = process.env.BACKEND || 'https://api.v1.mk';
 
-// Memory cache for Vercel (since Vercel doesn't support R2/KV like Cloudflare)
-const memoryCache = new Map();
-
 // Cached version string
 let cachedVersion = null;
 
-function generateRandomStr(len) {
-  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-  let result = '';
+function simpleHash(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash;
+  }
+  return Math.abs(hash).toString(36);
+}
+
+function generateDeterministicStr(input, len) {
+  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+  let hash = simpleHash(input || "default");
+  while (hash.length < len * 2) {
+    hash += simpleHash(hash);
+  }
+  let result = "";
   for (let i = 0; i < len; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
+    result += chars.charAt(hash.charCodeAt(i) % chars.length);
   }
   return result;
 }
 
-function generateRandomUUID() {
+function generateDeterministicUUID(input) {
+  const seed = generateDeterministicStr(input, 32);
+  let i = 0;
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
-    const r = (Math.random() * 16) | 0;
+    const r = parseInt(seed[i++], 36) % 16;
     const v = c == "x" ? r : (r & 3) | 8;
     return v.toString(16);
   });
@@ -70,7 +83,6 @@ function getFullUrl(requestUrl) {
   const search = url.search;
   if (!search) return url.searchParams.get('url');
 
-  // psub / subconverter top-level reserved parameters - comprehensive whitelist
   const reserved = [
     'target=', 'config=', 'emoji=', 'list=', 'udp=', 'tfo=', 'scv=', 'fdn=', 
     'sort=', 'dev=', 'bd=', 'insert=', 'exclude=', 'append_info=', 'expand=', 
@@ -96,7 +108,6 @@ function getFullUrl(requestUrl) {
   let bestCut = remaining.length;
 
   for (const r of reserved) {
-    // Only cut if the reserved parameter is preceded by '&'
     let rIdx = remaining.indexOf('&' + r);
     if (rIdx !== -1 && rIdx < bestCut) {
       bestCut = rIdx;
@@ -105,7 +116,6 @@ function getFullUrl(requestUrl) {
 
   let finalUrl = remaining.substring(0, bestCut);
   
-  // Deciding between greedy results and standard extraction
   const stdUrl = url.searchParams.get('url');
   if (stdUrl && stdUrl.includes('://') && stdUrl.length > finalUrl.length) {
     return stdUrl;
@@ -125,20 +135,18 @@ function parseData(data) {
 }
 
 // Obfuscation Functions
-function replaceInUri(link, replacements, isRecovery) {
-  if (link.startsWith("ss://")) return replaceSS(link, replacements, isRecovery);
-  if (link.startsWith("ssr://")) return replaceSSR(link, replacements, isRecovery);
-  if (link.startsWith("vmess://")) return replaceVmess(link, replacements, isRecovery);
-  if (link.startsWith("trojan://") || link.startsWith("vless://")) return replaceTrojan(link, replacements, isRecovery);
-  if (link.startsWith("hysteria://")) return replaceHysteria(link, replacements, isRecovery);
-  if (link.startsWith("hysteria2://")) return replaceHysteria2(link, replacements, isRecovery);
-  if (link.startsWith("socks://") || link.startsWith("socks5://")) return replaceSocks(link, replacements, isRecovery);
+function replaceInUri(link, replacements) {
+  if (link.startsWith("ss://")) return replaceSS(link, replacements);
+  if (link.startsWith("ssr://")) return replaceSSR(link, replacements);
+  if (link.startsWith("vmess://")) return replaceVmess(link, replacements);
+  if (link.startsWith("trojan://") || link.startsWith("vless://")) return replaceTrojan(link, replacements);
+  if (link.startsWith("hysteria://")) return replaceHysteria(link, replacements);
+  if (link.startsWith("hysteria2://")) return replaceHysteria2(link, replacements);
+  if (link.startsWith("socks://") || link.startsWith("socks5://")) return replaceSocks(link, replacements);
   return link;
 }
 
-function replaceSS(link, replacements, isRecovery) {
-  const randomPassword = generateRandomStr(12);
-  const randomDomain = randomPassword + ".com";
+function replaceSS(link, replacements) {
   let tempLink = link.slice(5).split("#")[0];
   if (tempLink.includes("@")) {
     const match = tempLink.match(/(\S+?)@(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):/);
@@ -150,6 +158,10 @@ function replaceSS(link, replacements, isRecovery) {
       if (parts.length < 2) return link;
       const encryption = parts[0];
       const password = parts.slice(1).join(":");
+      
+      const randomPassword = generateDeterministicStr(password, 12);
+      const randomDomain = generateDeterministicStr(server, 12) + ".com";
+      
       replacements[randomDomain] = server;
       replacements[randomPassword] = password;
       const newStr = urlSafeBase64Encode(encryption + ":" + randomPassword);
@@ -159,15 +171,15 @@ function replaceSS(link, replacements, isRecovery) {
   return link;
 }
 
-function replaceVmess(link, replacements, isRecovery) {
+function replaceVmess(link, replacements) {
   let tempLink = link.replace("vmess://", "");
   try {
     const decoded = urlSafeBase64Decode(tempLink);
     const jsonData = JSON.parse(decoded);
     const server = jsonData.add;
     const uuid = jsonData.id;
-    const randomDomain = generateRandomStr(10) + ".com";
-    const randomUUID = generateRandomUUID();
+    const randomDomain = generateDeterministicStr(server, 10) + ".com";
+    const randomUUID = generateDeterministicUUID(uuid);
     replacements[randomDomain] = server;
     replacements[randomUUID] = uuid;
     jsonData.add = randomDomain;
@@ -178,18 +190,18 @@ function replaceVmess(link, replacements, isRecovery) {
   }
 }
 
-function replaceTrojan(link, replacements, isRecovery) {
+function replaceTrojan(link, replacements) {
   const match = link.match(/(vless|trojan):\/\/(.*?)@(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):/);
   if (!match) return link;
   const [full, proto, uuid, server] = match;
-  const randomDomain = generateRandomStr(10) + ".com";
-  const randomUUID = generateRandomUUID();
+  const randomDomain = generateDeterministicStr(server, 10) + ".com";
+  const randomUUID = generateDeterministicUUID(uuid);
   replacements[randomDomain] = server;
   replacements[randomUUID] = uuid;
   return link.replace(uuid, randomUUID).replace(server, randomDomain);
 }
 
-function replaceSSR(link, replacements, isRecovery) {
+function replaceSSR(link, replacements) {
   try {
     let data = link.slice(6).replace("\r", "").split("#")[0];
     let decoded = urlSafeBase64Decode(data);
@@ -197,30 +209,22 @@ function replaceSSR(link, replacements, isRecovery) {
     if (!match) return link;
     const [, server, port, proto, method, obfs, password] = match;
     
-    if (isRecovery) {
-      const originalServer = replacements[server];
-      const originalPass = replacements[urlSafeBase64Decode(password)];
-      if (!originalServer || !originalPass) return link;
-      return "ssr://" + urlSafeBase64Encode(decoded.replace(server, originalServer).replace(password, urlSafeBase64Encode(originalPass)));
-    } else {
-      const randomDomain = generateRandomStr(12) + ".com";
-      const randomPass = generateRandomStr(12);
-      replacements[randomDomain] = server;
-      replacements[randomPass] = urlSafeBase64Decode(password);
-      return "ssr://" + urlSafeBase64Encode(decoded.replace(server, randomDomain).replace(password, urlSafeBase64Encode(randomPass)));
-    }
+    const passStr = urlSafeBase64Decode(password);
+    const randomDomain = generateDeterministicStr(server, 12) + ".com";
+    const randomPass = generateDeterministicStr(passStr, 12);
+    replacements[randomDomain] = server;
+    replacements[randomPass] = passStr;
+    return "ssr://" + urlSafeBase64Encode(decoded.replace(server, randomDomain).replace(password, urlSafeBase64Encode(randomPass)));
   } catch (e) { return link; }
 }
 
-function replaceSocks(link, replacements, isRecovery) {
+function replaceSocks(link, replacements) {
   try {
     let temp = link.replace(/^socks5?:\/\//, "");
     const hashSplit = temp.split("#");
     const hashPart = hashSplit.length > 1 ? "#" + hashSplit[1] : "";
     temp = hashSplit[0];
     const atIndex = temp.indexOf("@");
-    const fakeIP = `10.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}`;
-    const randomPass = generateRandomStr(12);
     
     if (atIndex !== -1) {
       const authBase64 = temp.slice(0, atIndex);
@@ -230,6 +234,10 @@ function replaceSocks(link, replacements, isRecovery) {
       const serverMatch = serverPort.match(/^(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):(\d+)$/);
       if (!serverMatch) return link;
       const [, server, port] = serverMatch;
+      
+      const fakeIP = `10.${generateDeterministicStr(server, 1).charCodeAt(0) % 256}.${generateDeterministicStr(server, 2).charCodeAt(0) % 256}.${generateDeterministicStr(server, 3).charCodeAt(0) % 256}`;
+      const randomPass = generateDeterministicStr(pass || "nopass", 12);
+      
       replacements[fakeIP] = server;
       if (pass) replacements[randomPass] = pass;
       return `socks://${utf8ToBase64(user + ":" + randomPass)}@${fakeIP}:${port}${hashPart}`;
@@ -237,32 +245,29 @@ function replaceSocks(link, replacements, isRecovery) {
       const serverMatch = temp.match(/^(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):(\d+)$/);
       if (!serverMatch) return link;
       const [, server, port] = serverMatch;
+      
+      const fakeIP = `10.${generateDeterministicStr(server, 1).charCodeAt(0) % 256}.${generateDeterministicStr(server, 2).charCodeAt(0) % 256}.${generateDeterministicStr(server, 3).charCodeAt(0) % 256}`;
       replacements[fakeIP] = server;
       return `socks://${fakeIP}:${port}${hashPart}`;
     }
   } catch (e) { return link; }
 }
 
-function replaceHysteria(link, replacements, isRecovery) {
+function replaceHysteria(link, replacements) {
   const match = link.match(/hysteria:\/\/(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):/);
   if (!match) return link;
   const server = match[1];
-  if (isRecovery) {
-    const original = replacements[server];
-    return original ? link.replace(server, original) : link;
-  } else {
-    const randomDomain = generateRandomStr(12) + ".com";
-    replacements[randomDomain] = server;
-    return link.replace(server, randomDomain);
-  }
+  const randomDomain = generateDeterministicStr(server, 12) + ".com";
+  replacements[randomDomain] = server;
+  return link.replace(server, randomDomain);
 }
 
-function replaceHysteria2(link, replacements, isRecovery) {
+function replaceHysteria2(link, replacements) {
   const match = link.match(/(hysteria2):\/\/(.*)@(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):/);
   if (!match) return link;
   const [full, proto, uuid, server] = match;
-  const randomDomain = generateRandomStr(10) + ".com";
-  const randomUUID = generateRandomUUID();
+  const randomDomain = generateDeterministicStr(server, 10) + ".com";
+  const randomUUID = generateDeterministicUUID(uuid);
   replacements[randomDomain] = server;
   replacements[randomUUID] = uuid;
   return link.replace(uuid, randomUUID).replace(server, randomDomain);
@@ -273,7 +278,7 @@ function replaceYAMLContent(content, replacements) {
   const serverRegex = /server:\s*(\S+)/g;
   result = result.replace(serverRegex, (match, server) => {
     if (server.includes(".") || server.includes(":")) {
-       const randomDomain = generateRandomStr(12) + ".com";
+       const randomDomain = generateDeterministicStr(server, 12) + ".com";
        replacements[randomDomain] = server;
        return `server: ${randomDomain}`;
     }
@@ -281,13 +286,13 @@ function replaceYAMLContent(content, replacements) {
   });
   const uuidRegex = /uuid:\s*(\S+)/g;
   result = result.replace(uuidRegex, (match, uuid) => {
-    const randomUUID = generateRandomUUID();
+    const randomUUID = generateDeterministicUUID(uuid);
     replacements[randomUUID] = uuid;
     return `uuid: ${randomUUID}`;
   });
   const passRegex = /password:\s*(\S+)/g;
   result = result.replace(passRegex, (match, pass) => {
-    const randomPass = generateRandomStr(12);
+    const randomPass = generateDeterministicStr(pass, 12);
     replacements[randomPass] = pass;
     return `password: ${randomPass}`;
   });
@@ -327,19 +332,15 @@ async function processSubscription(request, url, backend) {
   }
 
   const host = getHost(request);
-  const subInternalDir = 'sub/internal';
+  const subDir = 'subscription';
   const replacements = {};
   const replacedURIs = [];
-  const keys = [];
 
   const urlParts = targetUrl.split('|').filter(part => part.trim() !== '');
 
   for (const part of urlParts) {
-    const key = generateRandomStr(16);
-    let plaintextData = "";
-    let responseHeaders = {};
-
     if (part.startsWith('http://') || part.startsWith('https://')) {
+      // Pre-fetch remote URLs in main request to learn dictionary mappings mapping deterministically.
       try {
         const response = await fetch(part, {
           headers: {
@@ -347,37 +348,39 @@ async function processSubscription(request, url, backend) {
           }
         });
         if (response.ok) {
-          plaintextData = await response.text();
-          responseHeaders = Object.fromEntries(response.headers);
+          const plaintextData = await response.text();
+          const parsed = parseData(plaintextData);
+          if (parsed.format === "base64") {
+            const links = parsed.data.split(/\r?\n/).filter(l => l.trim());
+            for (const link of links) {
+              replaceInUri(link, replacements);
+            }
+          } else if (parsed.format === "yaml") {
+            replaceYAMLContent(plaintextData, replacements);
+          }
         }
       } catch (e) {
-        console.error("Fetch failed:", part, e.message);
-        continue;
+         // ignore
       }
+      
+      const encodedUrl = urlSafeBase64Encode(part);
+      replacedURIs.push(`${host}/${subDir}/B64_${encodedUrl}`);
     } else {
-      plaintextData = part;
-    }
-
-    if (plaintextData) {
-      const parsed = parseData(plaintextData);
-      let obfuscatedData = plaintextData;
-
+      let obfuscatedData = part;
+      const parsed = parseData(part);
       if (parsed.format === "base64") {
         const links = parsed.data.split(/\r?\n/).filter(l => l.trim());
         const newLinks = [];
         for (const link of links) {
-          const nl = replaceInUri(link, replacements, false);
+          const nl = replaceInUri(link, replacements);
           newLinks.push(nl || link);
         }
-        obfuscatedData = utf8ToBase64(newLinks.join("\r\n"));
+        obfuscatedData = utf8ToBase64(newLinks.join("\n"));
       } else if (parsed.format === "yaml") {
-        obfuscatedData = replaceYAMLContent(plaintextData, replacements);
+        obfuscatedData = replaceYAMLContent(part, replacements);
       }
-
-      memoryCache.set(key, obfuscatedData);
-      memoryCache.set(key + "_headers", JSON.stringify(responseHeaders));
-      keys.push(key);
-      replacedURIs.push(`${host}/${subInternalDir}/${key}`);
+      
+      replacedURIs.push(obfuscatedData);
     }
   }
 
@@ -431,31 +434,20 @@ async function processSubscription(request, url, backend) {
       const target = url.searchParams.get("target");
       
       try {
-        // 先尝试 Base64 解码
         const decoded = urlSafeBase64Decode(content);
-        // 如果解码成功且包含特征字符 (或者原本就是 base64 响应)
         if (decoded && (decoded.includes("://") || decoded.includes("proxies:") || decoded.includes("port:"))) {
            const recovered = decoded.replace(recoveryRegex, (match) => replacements[match] || match);
-           // 只有当明确要求 target=base64 时才重编码，否则返回明文
            if (target === "base64") {
              content = utf8ToBase64(recovered);
            } else {
              content = recovered;
            }
         } else {
-          // 如果不是 base64，直接替换
           content = content.replace(recoveryRegex, (match) => replacements[match] || match);
         }
       } catch (e) {
-        // 解码失败则作为明文替换
         content = content.replace(recoveryRegex, (match) => replacements[match] || match);
       }
-    }
-
-    // Clean up cache
-    for (const k of keys) {
-      memoryCache.delete(k);
-      memoryCache.delete(k + "_headers");
     }
 
     const responseHeaders = new Headers();
@@ -505,19 +497,43 @@ export default async function handler(request) {
     }
   }
 
-  // 内部临时订阅端点
-  if (url.pathname.includes("/internal/")) {
-    const pathSegments = url.pathname.split("/").filter(s => s);
-    const key = pathSegments[pathSegments.length - 1];
-    
-    let content = memoryCache.get(key);
-    let headersJson = memoryCache.get(key + "_headers");
+  // Subscription content endpoint (Stateless Proxy with Obfuscation)
+  if (url.pathname.startsWith('/subscription/')) {
+    const key = url.pathname.replace('/subscription/', '');
+    if (!key) return new Response('Invalid key', { status: 400 });
 
-    if (!content) return new Response("Not Found", { status: 404 });
+    if (key.startsWith('B64_')) {
+      try {
+        const encoded = key.substring(4);
+        const originalUrl = urlSafeBase64Decode(encoded);
+        
+        const response = await fetch(originalUrl, {
+          headers: { 'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0' }
+        });
 
-    const headers = new Headers(headersJson ? JSON.parse(headersJson) : { "Content-Type": "text/plain; charset=utf-8", "Access-Control-Allow-Origin": "*" });
-    headers.set("Access-Control-Allow-Origin", "*");
-    return new Response(content, { headers });
+        if (!response.ok) return new Response(`Error: ${response.status}`, { status: response.status });
+
+        let content = await response.text();
+        
+        // --- Obfuscate Remote Content on the fly ---
+        const replacements = {}; 
+        const parsed = parseData(content);
+        if (parsed.format === "base64") {
+          const links = parsed.data.split(/\r?\n/).filter(l => l.trim());
+          const obfuscatedLinks = links.map(l => replaceInUri(l, replacements));
+          content = utf8ToBase64(obfuscatedLinks.join("\n"));
+        } else if (parsed.format === "yaml") {
+          content = replaceYAMLContent(content, replacements);
+        }
+        
+        return new Response(content, {
+          headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Access-Control-Allow-Origin': '*' }
+        });
+      } catch (e) {
+        return new Response(`Error: ${e.message}`, { status: 500 });
+      }
+    }
+    return new Response('Not Found', { status: 404 });
   }
 
   // Subscription conversion endpoint
