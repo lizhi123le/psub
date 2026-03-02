@@ -258,7 +258,7 @@ async function processSubscription(request, url, backend) {
   const target = url.searchParams.get('target');
 
   if (!targetUrl) {
-    return new Response('Missing url parameter', { status: 400 });
+    return Response.redirect(host, 302);
   }
 
   const replacements = {};
