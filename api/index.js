@@ -271,6 +271,11 @@ async function processSubscription(request, url, backend) {
   }
 
   for (const urlPart of urlParts) {
+    if (target && (urlPart.startsWith('https://') || urlPart.startsWith('http://'))) {
+      replacedURIs.push(urlPart);
+      continue;
+    }
+
     const key = generateRandomStr(16);
     let plaintextData = "";
     let responseHeaders = {};
