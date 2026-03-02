@@ -22,39 +22,226 @@ function generateRandomStr(len) {
   return result;
 }
 
+function generateRandomUUID() {
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
+    const r = (Math.random() * 16) | 0;
+    const v = c == "x" ? r : (r & 3) | 8;
+    return v.toString(16);
+  });
+}
+
+function escapeRegExp(string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function urlSafeBase64Encode(input) {
+  return btoa(input).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function urlSafeBase64Decode(input) {
+  try {
+    const padded = input + "=".repeat((4 - (input.length % 4)) % 4);
+    const base64 = padded.replace(/-/g, "+").replace(/_/g, "/");
+    return base64ToUtf8(base64);
+  } catch (e) {
+    try {
+      return base64ToUtf8(input);
+    } catch (e2) {
+      return input;
+    }
+  }
+}
+
+function base64ToUtf8(str) {
+  try {
+    return decodeURIComponent(escape(atob(str)));
+  } catch (e) {
+    return atob(str);
+  }
+}
+
+function utf8ToBase64(str) {
+  return btoa(unescape(encodeURIComponent(str)));
+}
+
 // Parse subscription data format
 function parseData(data) {
+  if (data.includes("proxies:")) return { format: "yaml", data: data };
   try {
-    // Try to detect format
-    const trimmed = data.trim();
+    const decoded = urlSafeBase64Decode(data.trim());
+    if (decoded.includes("://") || decoded.includes("proxies:")) return { format: "base64", data: decoded };
+  } catch (e) {}
+  return { format: "unknown", data: data };
+}
 
-    // Check if it's base64
-    const base64Pattern = /^[A-Za-z0-9+/=\s]+$/;
-    if (base64Pattern.test(trimmed) && trimmed.length > 20) {
-      try {
-        const decoded = atob(trimmed.replace(/\s/g, ''));
-        if (decoded.includes('://')) {
-          return { format: 'base64', data: decoded };
-        }
-      } catch (e) {
-        // Not valid base64
-      }
-    }
+// Obfuscation Functions
+function replaceInUri(link, replacements, isRecovery) {
+  if (link.startsWith("ss://")) return replaceSS(link, replacements, isRecovery);
+  if (link.startsWith("ssr://")) return replaceSSR(link, replacements, isRecovery);
+  if (link.startsWith("vmess://")) return replaceVmess(link, replacements, isRecovery);
+  if (link.startsWith("trojan://") || link.startsWith("vless://")) return replaceTrojan(link, replacements, isRecovery);
+  if (link.startsWith("hysteria://")) return replaceHysteria(link, replacements, isRecovery);
+  if (link.startsWith("hysteria2://")) return replaceHysteria2(link, replacements, isRecovery);
+  if (link.startsWith("socks://") || link.startsWith("socks5://")) return replaceSocks(link, replacements, isRecovery);
+  return link;
+}
 
-    // Check if it's YAML (Clash config)
-    if (trimmed.includes('proxies:') || trimmed.includes('Proxy:')) {
-      return { format: 'yaml', data: trimmed };
-    }
-
-    // Check if it's direct node links
-    if (/^(ssr?|vmess1?|trojan|vless|hysteria|hysteria2|tg):\/\//.test(trimmed)) {
-      return { format: 'direct', data: trimmed };
-    }
-
-    return { format: 'unknown', data: trimmed };
-  } catch (e) {
-    return { format: 'unknown', data: data };
+function replaceSS(link, replacements, isRecovery) {
+  const randomPassword = generateRandomStr(12);
+  const randomDomain = randomPassword + ".com";
+  let tempLink = link.slice(5).split("#")[0];
+  if (tempLink.includes("@")) {
+    const match = tempLink.match(/(\S+?)@(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):/);
+    if (!match) return link;
+    const [full, base64Data, server] = match;
+    try {
+      const decoded = urlSafeBase64Decode(base64Data);
+      const parts = decoded.split(":");
+      if (parts.length < 2) return link;
+      const encryption = parts[0];
+      const password = parts.slice(1).join(":");
+      replacements[randomDomain] = server;
+      replacements[randomPassword] = password;
+      const newStr = urlSafeBase64Encode(encryption + ":" + randomPassword);
+      return link.replace(base64Data, newStr).replace(server, randomDomain);
+    } catch (e) { return link; }
   }
+  return link;
+}
+
+function replaceVmess(link, replacements, isRecovery) {
+  let tempLink = link.replace("vmess://", "");
+  try {
+    const decoded = urlSafeBase64Decode(tempLink);
+    const jsonData = JSON.parse(decoded);
+    const server = jsonData.add;
+    const uuid = jsonData.id;
+    const randomDomain = generateRandomStr(10) + ".com";
+    const randomUUID = generateRandomUUID();
+    replacements[randomDomain] = server;
+    replacements[randomUUID] = uuid;
+    jsonData.add = randomDomain;
+    jsonData.id = randomUUID;
+    return "vmess://" + utf8ToBase64(JSON.stringify(jsonData));
+  } catch (e) {
+    return link;
+  }
+}
+
+function replaceTrojan(link, replacements, isRecovery) {
+  const match = link.match(/(vless|trojan):\/\/(.*?)@(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):/);
+  if (!match) return link;
+  const [full, proto, uuid, server] = match;
+  const randomDomain = generateRandomStr(10) + ".com";
+  const randomUUID = generateRandomUUID();
+  replacements[randomDomain] = server;
+  replacements[randomUUID] = uuid;
+  return link.replace(uuid, randomUUID).replace(server, randomDomain);
+}
+
+function replaceSSR(link, replacements, isRecovery) {
+  try {
+    let data = link.slice(6).replace("\r", "").split("#")[0];
+    let decoded = urlSafeBase64Decode(data);
+    const match = decoded.match(/([\[\]\da-fA-F:\.]+|[\w\.-]+):(\d+?):(\S+?):(\S+?):(\S+?):(\S+)\//);
+    if (!match) return link;
+    const [, server, port, proto, method, obfs, password] = match;
+    
+    if (isRecovery) {
+      const originalServer = replacements[server];
+      const originalPass = replacements[urlSafeBase64Decode(password)];
+      if (!originalServer || !originalPass) return link;
+      return "ssr://" + urlSafeBase64Encode(decoded.replace(server, originalServer).replace(password, urlSafeBase64Encode(originalPass)));
+    } else {
+      const randomDomain = generateRandomStr(12) + ".com";
+      const randomPass = generateRandomStr(12);
+      replacements[randomDomain] = server;
+      replacements[randomPass] = urlSafeBase64Decode(password);
+      return "ssr://" + urlSafeBase64Encode(decoded.replace(server, randomDomain).replace(password, urlSafeBase64Encode(randomPass)));
+    }
+  } catch (e) { return link; }
+}
+
+function replaceSocks(link, replacements, isRecovery) {
+  try {
+    let temp = link.replace(/^socks5?:\/\//, "");
+    const hashSplit = temp.split("#");
+    const hashPart = hashSplit.length > 1 ? "#" + hashSplit[1] : "";
+    temp = hashSplit[0];
+    const atIndex = temp.indexOf("@");
+    const fakeIP = `10.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}`;
+    const randomPass = generateRandomStr(12);
+    
+    if (atIndex !== -1) {
+      const authBase64 = temp.slice(0, atIndex);
+      const serverPort = temp.slice(atIndex + 1);
+      const auth = atob(authBase64);
+      const [user, pass] = auth.split(":");
+      const serverMatch = serverPort.match(/^(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):(\d+)$/);
+      if (!serverMatch) return link;
+      const [, server, port] = serverMatch;
+      replacements[fakeIP] = server;
+      if (pass) replacements[randomPass] = pass;
+      return `socks://${utf8ToBase64(user + ":" + randomPass)}@${fakeIP}:${port}${hashPart}`;
+    } else {
+      const serverMatch = temp.match(/^(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):(\d+)$/);
+      if (!serverMatch) return link;
+      const [, server, port] = serverMatch;
+      replacements[fakeIP] = server;
+      return `socks://${fakeIP}:${port}${hashPart}`;
+    }
+  } catch (e) { return link; }
+}
+
+function replaceHysteria(link, replacements, isRecovery) {
+  const match = link.match(/hysteria:\/\/(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):/);
+  if (!match) return link;
+  const server = match[1];
+  if (isRecovery) {
+    const original = replacements[server];
+    return original ? link.replace(server, original) : link;
+  } else {
+    const randomDomain = generateRandomStr(12) + ".com";
+    replacements[randomDomain] = server;
+    return link.replace(server, randomDomain);
+  }
+}
+
+function replaceHysteria2(link, replacements, isRecovery) {
+  const match = link.match(/(hysteria2):\/\/(.*)@(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):/);
+  if (!match) return link;
+  const [full, proto, uuid, server] = match;
+  const randomDomain = generateRandomStr(10) + ".com";
+  const randomUUID = generateRandomUUID();
+  replacements[randomDomain] = server;
+  replacements[randomUUID] = uuid;
+  return link.replace(uuid, randomUUID).replace(server, randomDomain);
+}
+
+function replaceYAMLContent(content, replacements) {
+  let result = content;
+  const serverRegex = /server:\s*(\S+)/g;
+  result = result.replace(serverRegex, (match, server) => {
+    if (server.includes(".") || server.includes(":")) {
+       const randomDomain = generateRandomStr(12) + ".com";
+       replacements[randomDomain] = server;
+       return `server: ${randomDomain}`;
+    }
+    return match;
+  });
+  const uuidRegex = /uuid:\s*(\S+)/g;
+  result = result.replace(uuidRegex, (match, uuid) => {
+    const randomUUID = generateRandomUUID();
+    replacements[randomUUID] = uuid;
+    return `uuid: ${randomUUID}`;
+  });
+  const passRegex = /password:\s*(\S+)/g;
+  result = result.replace(passRegex, (match, pass) => {
+    const randomPass = generateRandomStr(12);
+    replacements[randomPass] = pass;
+    return `password: ${randomPass}`;
+  });
+  return result;
 }
 
 // Extract host from URL
@@ -74,13 +261,9 @@ async function processSubscription(request, url, backend) {
     return new Response('Missing url parameter', { status: 400 });
   }
 
-  // If there's a target parameter (like 'clash'), forward to backend for conversion first
-  if (target) {
-    return await forwardToBackend(request, url, backend, host, subDir);
-  }
-
-  // Original logic for non-target requests
+  const replacements = {};
   const replacedURIs = [];
+  const keys = [];
   const urlParts = targetUrl.split('|').filter(part => part.trim() !== '');
 
   if (urlParts.length === 0) {
@@ -89,64 +272,61 @@ async function processSubscription(request, url, backend) {
 
   for (const urlPart of urlParts) {
     const key = generateRandomStr(16);
+    let plaintextData = "";
+    let responseHeaders = {};
 
     if (urlPart.startsWith('https://') || urlPart.startsWith('http://')) {
       try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 20000);
-
         const response = await fetch(urlPart, {
           method: 'GET',
           headers: {
-            'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          },
-          signal: controller.signal,
-        });
-
-        clearTimeout(timeoutId);
-
-        if (!response.ok) continue;
-
-        const content = await response.text();
-        if (!content || content.trim().length === 0) continue;
-
-        const parsed = parseData(content);
-        const headers = Object.fromEntries(response.headers);
-        memoryCache.set(key + '_headers', JSON.stringify(headers));
-
-        if (parsed.format === 'base64') {
-          const links = parsed.data.split(/\r?\n/).filter(link => link.trim() !== '');
-          for (const link of links) {
-            const nodeKey = generateRandomStr(16);
-            memoryCache.set(nodeKey, link);
-            memoryCache.set(nodeKey + '_headers', JSON.stringify({ 'Content-Type': 'text/plain' }));
-            replacedURIs.push(`${host}/${subDir}/${nodeKey}`);
+            'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0',
           }
-        } else {
-          memoryCache.set(key, content);
-          memoryCache.set(key + '_headers', JSON.stringify({ 'Content-Type': 'text/plain;charset=UTF-8' }));
-          replacedURIs.push(`${host}/${subDir}/${key}`);
+        });
+        if (response.ok) {
+          plaintextData = await response.text();
+          responseHeaders = Object.fromEntries(response.headers);
         }
       } catch (e) {
         console.error('Fetch error:', e.message);
         continue;
       }
-    } else if (/^(ssr?|vmess1?|trojan|vless|hysteria|hysteria2|tg):\/\//.test(urlPart)) {
-      memoryCache.set(key, urlPart);
-      memoryCache.set(key + '_headers', JSON.stringify({ 'Content-Type': 'text/plain' }));
+    } else {
+      plaintextData = urlPart;
+    }
+
+    if (plaintextData) {
+      const parsed = parseData(plaintextData);
+      let obfuscatedData = plaintextData;
+
+      if (parsed.format === 'base64') {
+        const links = parsed.data.split(/\r?\n/).filter(link => link.trim() !== '');
+        const newLinks = [];
+        for (const link of links) {
+          newLinks.push(replaceInUri(link, replacements, false));
+        }
+        obfuscatedData = utf8ToBase64(newLinks.join('\r\n'));
+      } else if (parsed.format === 'yaml') {
+        obfuscatedData = replaceYAMLContent(plaintextData, replacements);
+      }
+
+      memoryCache.set(key, obfuscatedData);
+      memoryCache.set(key + '_headers', JSON.stringify(responseHeaders || { 'Content-Type': 'text/plain;charset=UTF-8' }));
+      keys.push(key);
       replacedURIs.push(`${host}/${subDir}/${key}`);
     }
   }
 
   if (replacedURIs.length === 0) {
-    return new Response('Error: All subscription links are invalid or returned empty content.', { 
-      status: 400,
-      headers: { 'Content-Type': 'text/plain' }
-    });
+    return new Response('Error: No valid nodes found', { status: 400 });
   }
 
-  const result = btoa(replacedURIs.join('\r\n'));
+  // If there's a target parameter, forward to backend for conversion
+  if (target) {
+    return await forwardToBackend(request, url, backend, host, subDir, replacements, keys);
+  }
+
+  const result = utf8ToBase64(replacedURIs.join('\r\n'));
   return new Response(result, {
     headers: {
       'Content-Type': 'text/plain',
@@ -155,20 +335,20 @@ async function processSubscription(request, url, backend) {
   });
 }
 
-// Forward to backend for conversion, then replace domain
-async function forwardToBackend(request, url, backend, host, subDir) {
+// Forward to backend for conversion, then restore original node details
+async function forwardToBackend(request, url, backend, host, subDir, replacements, keys) {
   try {
-    // Build backend URL with all parameters
-    const backendUrl = `${backend}${url.pathname}${url.search}`;
+    const newUrl = (memoryCache.keys ? Array.from(memoryCache.keys()) : []).filter(k => !k.endsWith('_headers')).map(k => `${host}/${subDir}/${k}`).join('|');
+    const originalParams = new URL(request.url).searchParams;
+    originalParams.set('url', newUrl);
     
-    // Debug: return the URL being fetched
-    // return new Response(`Debug: ${backendUrl}`, { status: 200 });
+    const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
+    const backendUrl = `${backendBase}/sub?${originalParams.toString()}`;
     
     const response = await fetch(backendUrl, {
       method: 'GET',
       headers: {
-        'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'text/plain,*/*',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
       }
     });
 
@@ -176,31 +356,49 @@ async function forwardToBackend(request, url, backend, host, subDir) {
       return new Response(`Backend error: ${response.status}`, { status: response.status });
     }
 
-    // Read response as bytes and decode with UTF-8 support
-    const buffer = await response.arrayBuffer();
-    const decoder = new TextDecoder('utf-8');
-    let content = decoder.decode(buffer);
+    let content = await response.text();
     
-    // Get current host without protocol for domain-only replacement
-    const currentHost = url.host;
+    // Recovery mapping
+    if (Object.keys(replacements).length > 0) {
+      const recoveryRegex = new RegExp(
+        Object.keys(replacements).map(escapeRegExp).join("|"),
+        "g"
+      );
+      
+      const target = url.searchParams.get("target");
+      
+      try {
+        const decoded = urlSafeBase64Decode(content);
+        if (decoded && (decoded.includes("://") || decoded.includes("proxies:") || decoded.includes("port:"))) {
+          const recovered = decoded.replace(recoveryRegex, (match) => replacements[match] || match);
+          if (target === "base64") {
+            content = utf8ToBase64(recovered);
+          } else {
+            content = recovered;
+          }
+        } else {
+          content = content.replace(recoveryRegex, (match) => replacements[match] || match);
+        }
+      } catch (e) {
+        content = content.replace(recoveryRegex, (match) => replacements[match] || match);
+      }
+    }
     
-    // Replace bulianglin2023.dev with current host in the content
-    content = content.replace(/https:\/\/bulianglin2023\.dev/g, host);
-    content = content.replace(/bulianglin2023\.dev/g, currentHost);
-    
-    // Also replace any other known backend domains
-    content = content.replace(/https:\/\/api\.v1\.mk/g, host);
-    content = content.replace(/api\.v1\.mk/g, currentHost);
+    // Cleanup cache
+    for (const key of keys) {
+      memoryCache.delete(key);
+      memoryCache.delete(key + '_headers');
+    }
 
     return new Response(content, {
       status: 200,
       headers: {
-        'Content-Type': response.headers.get('Content-Type') || 'text/plain',
+        'Content-Type': 'text/plain; charset=utf-8',
         'Access-Control-Allow-Origin': '*',
       }
     });
   } catch (e) {
-    return new Response(`Error forwarding to backend: ${e.message}`, { status: 500 });
+    return new Response(`Error: ${e.message}`, { status: 500 });
   }
 }
 
