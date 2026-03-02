@@ -22,9 +22,30 @@ function generateRandomStr(len) {
   return result;
 }
 
+function generateDeterministicRandomStr(input, len) {
+  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+  let result = "";
+  if (!input) input = Math.random().toString();
+  for (let i = 0; i < len; i++) {
+    const charCode = input.charCodeAt(i % input.length) + i;
+    result += chars.charAt(charCode % chars.length);
+  }
+  return result;
+}
+
 function generateRandomUUID() {
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
     const r = (Math.random() * 16) | 0;
+    const v = c == "x" ? r : (r & 3) | 8;
+    return v.toString(16);
+  });
+}
+
+function generateDeterministicUUID(input) {
+  const seed = generateDeterministicRandomStr(input, 32);
+  let i = 0;
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
+    const r = parseInt(seed[i++], 36) % 16;
     const v = c == "x" ? r : (r & 3) | 8;
     return v.toString(16);
   });
@@ -258,17 +279,11 @@ function replaceHysteria(link, replacements, isRecovery) {
 }
 
 function replaceHysteria2(link, replacements, isRecovery) {
-  const randomDomain = generateDeterministicRandomStr(server, 12) + ".com";
-  replacements[randomDomain] = server;
-  return link.replace(server, randomDomain);
-}
-
-function replaceHysteria2(link, replacements) {
   const match = link.match(/(hysteria2):\/\/(.*)@(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):/);
   if (!match) return link;
   const [full, proto, uuid, server] = match;
-  const randomDomain = generateDeterministicRandomStr(server, 10) + ".com";
-  const randomUUID = generateDeterministicUUID(uuid);
+  const randomDomain = generateRandomStr(10) + ".com";
+  const randomUUID = generateRandomUUID();
   replacements[randomDomain] = server;
   replacements[randomUUID] = uuid;
   return link.replace(uuid, randomUUID).replace(server, randomDomain);
