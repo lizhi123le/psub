@@ -3954,6 +3954,70 @@ async function handleFetchRequest(request, env) {
   return new Response("Not Found", { status: 404 });
 }
 
+function parseData(data) {
+  if (data.includes("proxies:")) return { format: "yaml", data: data };
+  try {
+    const decoded = atob(data.trim());
+    if (decoded.includes("://") || decoded.includes("proxies:")) return { format: "base64", data: decoded };
+  } catch (e) {}
+  try {
+    const decoded = urlSafeBase64Decode(data.trim());
+    if (decoded.includes("://") || decoded.includes("proxies:")) return { format: "base64", data: decoded };
+  } catch (e) {}
+  return { format: "unknown", data: data };
+}
+
+function utf8ToBase64(str) {
+  return btoa(unescape(encodeURIComponent(str)));
+}
+
+function base64ToUtf8(str) {
+  try {
+    return decodeURIComponent(escape(atob(str)));
+  } catch (e) {
+    return atob(str);
+  }
+}
+
+function urlSafeBase64Decode(input) {
+  try {
+    const padded = input + "=".repeat((4 - (input.length % 4)) % 4);
+    return atob(padded.replace(/-/g, "+").replace(/_/g, "/"));
+  } catch (e) {
+    return atob(input);
+  }
+}
+
+function urlSafeBase64Encode(input) {
+  return btoa(input).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function generateRandomStr(len) {
+  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+  let result = "";
+  for (let i = 0; i < len; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
+
+function generateRandomUUID() {
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
+    const r = (Math.random() * 16) | 0;
+    const v = c == "x" ? r : (r & 3) | 8;
+    return v.toString(16);
+  });
+}
+
+function cReplace(match, ...replacementPairs) {
+  for (let i = 0; i < replacementPairs.length; i += 2) {
+    if (match === replacementPairs[i]) {
+      return replacementPairs[i + 1];
+    }
+  }
+  return match;
+}
+
 export default {
   async fetch(request, env) {
     return await handleFetchRequest(request, env);
