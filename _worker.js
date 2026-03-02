@@ -3658,1177 +3658,307 @@ var require_js_yaml = __commonJS({
 // src/index.js
 init_modules_watch_stub();
 var yaml = require_js_yaml();
-var src_default = {
-  async fetch(request, env) {
-    try {
-      const url = new URL(request.url);
-      const host = url.origin;
-      const frontendUrl =
-        "https://raw.githubusercontent.com/lizhi123le/psub/refs/heads/main/index.html";
-
-      // 数据存储配置: 优先使用 Cloudflare R2/KV (env.SUB_BUCKET)，如果没有配置则回退到内存缓存
-      let SUB_BUCKET = null;
-      let useMemoryCache = false;
-      const memoryCache = new Map();
-
-      if (env.SUB_BUCKET) {
-        SUB_BUCKET = env.SUB_BUCKET;
-      } else {
-        useMemoryCache = true;
-      }
-
-      // 检查 BACKEND 配置
-      if (!env.BACKEND) {
-        console.error("[psub] 错误: 未配置 BACKEND 环境变量");
-        return new Response(
-          "Error: BACKEND environment variable is not configured",
-          { status: 500 },
-        );
-      }
-
-      let backend = env.BACKEND.replace(/(https?:\/\/[^/]+).*$/, "$1");
-      console.log(
-        "[psub] 初始后端地址:",
-        backend,
-        "| 内存缓存:",
-        useMemoryCache,
-      );
-      const subDir = "subscription";
-      const pathSegments = url.pathname
-        .split("/")
-        .filter((segment) => segment.length > 0);
-
-      // Robustly extract 'url' parameter using greedy matching to prevent truncation by internal '&'
-      function getFullUrl(requestUrl) {
-        const u = new URL(requestUrl);
-        const search = u.search;
-        if (!search) return u.searchParams.get('url');
-
-        // psub / subconverter top-level reserved parameters - comprehensive whitelist
-        const reserved = [
-          'target=', 'config=', 'emoji=', 'list=', 'udp=', 'tfo=', 'scv=', 'fdn=', 
-          'sort=', 'dev=', 'bd=', 'insert=', 'exclude=', 'append_info=', 'expand=', 
-          'new_name=', 'rename=', 'filename=', 'path=', 'prefix=', 'suffix=', 'ver=',
-          'xudp=', 'doh=', 'rule=', 'script=', 'node=', 'group=', 'filter='
-        ];
-        
-        let searchStr = search.substring(1);
-        let urlStart = -1;
-        const urlKeys = ['url=', 'sub=']; 
-        
-        for (const k of urlKeys) {
-          let idx = searchStr.indexOf(k);
-          if (idx !== -1 && (idx === 0 || searchStr[idx - 1] === '&')) {
-            urlStart = idx + k.length;
-            break;
-          }
-        }
-
-        if (urlStart === -1) return u.searchParams.get('url');
-
-        let remaining = searchStr.substring(urlStart);
-        let bestCut = remaining.length;
-
-        for (const r of reserved) {
-          // Only cut if the reserved parameter is preceded by '&'
-          let rIdx = remaining.indexOf('&' + r);
-          if (rIdx !== -1 && rIdx < bestCut) {
-            bestCut = rIdx;
-          }
-        }
-
-        let finalUrl = remaining.substring(0, bestCut);
-        
-        const stdUrl = u.searchParams.get('url');
-        if (stdUrl && stdUrl.includes('://') && stdUrl.length > finalUrl.length) {
-          return stdUrl;
-        }
-        
-        return decodeURIComponent(finalUrl);
-      }
-
-      // 内部临时订阅端点 (Stateless Proxy support)
-      if (url.pathname.includes(`/${subDir}/B64_`)) {
-        const key = url.pathname.split("/").pop();
-        if (key && key.startsWith("B64_")) {
-          try {
-            const encoded = key.substring(4);
-            const padded = encoded + '='.repeat((4 - (encoded.length % 4)) % 4);
-            const originalUrl = atob(padded.replace(/-/g, '+').replace(/_/g, '/'));
-            
-            const response = await fetch(originalUrl, {
-              headers: {
-                'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-              }
-            });
-
-            if (!response.ok) {
-              return new Response(`Error fetching subscription: ${response.status}`, { status: response.status });
-            }
-
-            const content = await response.text();
-            const responseHeaders = new Headers(response.headers);
-            responseHeaders.set('Access-Control-Allow-Origin', '*');
-            
-            return new Response(content, {
-              status: 200,
-              headers: responseHeaders
-            });
-          } catch (e) {
-            return new Response(`Error: ${e.message}`, { status: 500 });
-          }
-        }
-      }
-
-      const urlParam = getFullUrl(request.url);
-
-      // 优先检查是否有 url 参数（订阅转换）
-      if (urlParam) {
-        // 继续执行订阅转换逻辑
-      } else if (pathSegments.length === 0) {
-        // 根路径且没有 url 参数，返回前端页面
-        const response = await fetch(frontendUrl);
-        if (response.status !== 200) {
-          return new Response("Failed to fetch frontend", {
-            status: response.status,
-          });
-        }
-        const originalHtml = await response.text();
-        return new Response(originalHtml, {
-          status: 200,
-          headers: {
-            "Content-Type": "text/html",
-          },
-        });
-      } else if (pathSegments[0] === subDir) {
-        // 访问 /subscription/{key} 获取存储的订阅内容
-        const key = pathSegments[pathSegments.length - 1];
-
-        let object, object_headers;
-        if (useMemoryCache) {
-          // Vercel 内存缓存
-          object = memoryCache.get(key);
-          object_headers = memoryCache.get(key + "_headers");
-        } else {
-          // Cloudflare R2/KV
-          object = await SUB_BUCKET.get(key);
-          object_headers = await SUB_BUCKET.get(key + "_headers");
-        }
-
-        if (!object) return new Response("Not Found", { status: 404 });
-
-        if (!useMemoryCache && "R2Bucket" === SUB_BUCKET.constructor.name) {
-          const headers = object_headers
-            ? new Headers(await object_headers.json())
-            : new Headers({ "Content-Type": "text/plain;charset=UTF-8" });
-          return new Response(object.body, { headers });
-        } else {
-          const headers = object_headers
-            ? new Headers(JSON.parse(object_headers))
-            : new Headers({ "Content-Type": "text/plain;charset=UTF-8" });
-          return new Response(object, { headers });
-        }
-      } else if (url.pathname === "/version") {
-        // 访问 /version 获取后端版本
-        try {
-          const version = await fetch(`${backend}/version`, {
-            signal: AbortSignal.timeout(5000),
-          });
-          const versionText = await version.text();
-          return new Response(versionText, {
-            status: 200,
-            headers: {
-              "Content-Type": "text/plain",
-              "Access-Control-Allow-Origin": "*",
-            },
-          });
-        } catch (e) {
-          return new Response(
-            JSON.stringify({
-              error: "Backend unavailable",
-              message: e.message,
-              backend: backend,
-            }),
-            {
-              status: 503,
-              headers: {
-                "Content-Type": "text/plain",
-                "Access-Control-Allow-Origin": "*",
-              },
-            },
-          );
-        }
-      } else {
-        return new Response("Missing URL parameter", { status: 400 });
-      }
-      const backendParam = url.searchParams.get("bd");
-      if (backendParam && /^https?:\/\/.+/i.test(backendParam)) {
-        backend = backendParam.replace(/(https?:\/\/[^/]+).*$/, "$1");
-        console.log("[psub] 使用自定义后端:", backend);
-      }
-      const replacements = {};
-      const replacedURIs = [];
-      const keys = [];
-      const failedURLs = []; // 记录失败的URL和原因
-      if (urlParam.startsWith("proxies:")) {
-        const { format, data } = parseData(urlParam.replace(/\|/g, "\r\n"));
-        if ("yaml" === format) {
-          const key = generateRandomStr(16);
-          const replacedYAMLData = replaceYAML(data, replacements);
-          if (replacedYAMLData) {
-            await SUB_BUCKET.put(key, replacedYAMLData);
-            keys.push(key);
-            replacedURIs.push(`${host}/${subDir}/${key}`);
-          }
-        }
-      } else {
-        const urlParts = urlParam.split("|").filter((part) => part.trim() !== "");
-        if (urlParts.length === 0)
-          return new Response("There are no valid links", { status: 400 });
-        let response, parsedObj, plaintextData;
-        for (const url2 of urlParts) {
-          if (url2.startsWith("https://") || url2.startsWith("http://")) {
-            // Stateless Proxy: Encode the URL into the path to avoid cache-miss (404/400)
-            const encodedUrl = btoa(url2).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-            replacedURIs.push(`${url.origin}/${subDir}/B64_${encodedUrl}`);
-            continue;
-          }
-          
-          const key = generateRandomStr(16);
-          if (url2.startsWith("https://") || url2.startsWith("http://")) {
-            console.log("[psub] 获取订阅:", url2);
-            try {
-              const controller = new AbortController();
-              const timeoutId = setTimeout(() => controller.abort(), 20000);
-              response = await fetch(url2, {
-                method: "GET",
-                headers: {
-                  "User-Agent":
-                    request.headers.get("User-Agent") ||
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                  Accept:
-                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                  "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                  "Accept-Encoding": "gzip, deflate, br",
-                  Referer: "https://www.google.com/",
-                  "Cache-Control": "no-cache",
-                  DNT: "1",
-                  Connection: "keep-alive",
-                },
-                redirect: "follow",
-                signal: controller.signal,
-              });
-              clearTimeout(timeoutId);
-            } catch (fetchError) {
-              console.error(
-                "[psub] 获取订阅失败:",
-                url2,
-                "错误类型:",
-                fetchError.name,
-                "消息:",
-                fetchError.message,
-              );
-              const reason =
-                fetchError.name === "AbortError"
-                  ? "请求超时(20秒)"
-                  : `网络错误: ${fetchError.message}`;
-              failedURLs.push({ url: url2, reason });
-              continue;
-            }
-            if (!response.ok) {
-              console.error(
-                "[psub] 订阅URL返回错误状态码:",
-                url2,
-                "Status:",
-                response.status,
-                response.statusText,
-              );
-              // 如果是 530 错误（Cloudflare Worker 间防护），提供特殊提示
-              if (response.status === 530) {
-                failedURLs.push({
-                  url: url2,
-                  reason:
-                    "HTTP 530 - Cloudflare Worker 间访问被拦截。请将订阅源部署到非 Cloudflare Worker 平台，或配置防火墙白名单。",
-                });
-              } else {
-                failedURLs.push({
-                  url: url2,
-                  reason: `HTTP ${response.status} ${response.statusText}`,
-                });
-              }
-              continue;
-            }
-            console.log("[psub] 订阅URL响应成功, 状态码:", response.status);
-            plaintextData = await response.text();
-            if (!plaintextData || plaintextData.trim().length === 0) {
-              console.error("[psub] 获取的订阅内容为空:", url2);
-              failedURLs.push({ url: url2, reason: "订阅内容为空" });
-              continue;
-            }
-            console.log("[psub] 获取订阅内容成功, 长度:", plaintextData.length);
-            console.log(
-              "[psub] 订阅内容前100字符:",
-              plaintextData.substring(0, 100).replace(/\n/g, "\\n"),
-            );
-            parsedObj = parseData(plaintextData);
-            console.log(
-              "[psub] HTTP订阅解析结果:",
-              parsedObj ? parsedObj.format : "null",
-              "有数据:",
-              !!parsedObj.data,
-            );
-
-            if (!parsedObj || !parsedObj.data) {
-              console.error("[psub] 订阅内容为空或解析失败:", url2);
-              continue;
-            }
-
-            // 存储原始响应头（所有格式都存储）
-            if (useMemoryCache) {
-              memoryCache.set(
-                key + "_headers",
-                JSON.stringify(Object.fromEntries(response.headers)),
-              );
-            } else {
-              await SUB_BUCKET.put(
-                key + "_headers",
-                JSON.stringify(Object.fromEntries(response.headers)),
-              );
-            }
-
-            // 如果格式无法识别，直接存储原始内容
-            if (parsedObj.format === "unknown") {
-              console.log("[psub] HTTP订阅格式未知，直接存储原始内容");
-              if (useMemoryCache) {
-                memoryCache.set(key, plaintextData);
-              } else {
-                await SUB_BUCKET.put(key, plaintextData);
-              }
-              keys.push(key);
-              replacedURIs.push(`${host}/${subDir}/${key}`);
-              console.log(
-                "[psub] 未知格式HTTP内容已存储:",
-                `${host}/${subDir}/${key}`,
-              );
-              continue;
-            }
-
-            console.log("[psub] HTTP订阅解析格式:", parsedObj.format);
-
-            // 兜底处理：如果HTTP获取的内容无法识别为任何已知格式，直接存储原始内容
-            if (
-              !parsedObj ||
-              parsedObj.format === "unknown" ||
-              !parsedObj.data
-            ) {
-              console.log(
-                "[psub] HTTP订阅无法解析为base64/yaml，直接存储原始响应",
-              );
-              if (useMemoryCache) {
-                memoryCache.set(key, plaintextData);
-              } else {
-                await SUB_BUCKET.put(key, plaintextData);
-              }
-              keys.push(key);
-              replacedURIs.push(`${host}/${subDir}/${key}`);
-              console.log(
-                "[psub] HTTP原始内容已存储(兜底):",
-                `${host}/${subDir}/${key}`,
-              );
-              continue;
-            }
-          } else {
-            // 直接传入的内容（base64编码的节点列表）
-            const key = generateRandomStr(16);
-            console.log("[psub] 处理直接传入的内容, 长度:", url2.length);
-            console.log("[psub] 内容前50字符:", url2.substring(0, 50));
-
-            // 先进行URL解码（处理URL编码的base64，如%3D=%）
-            let decodedContent;
-            try {
-              decodedContent = decodeURIComponent(url2);
-              console.log("[psub] URL解码成功, 新长度:", decodedContent.length);
-            } catch (e) {
-              // 如果URL解码失败，使用原始内容
-              decodedContent = url2;
-              console.log("[psub] URL解码失败，使用原始内容");
-            }
-
-            try {
-              parsedObj = parseData(decodedContent);
-              console.log(
-                "[psub] parseData结果:",
-                parsedObj ? parsedObj.format : "undefined",
-              );
-            } catch (parseError) {
-              console.error(
-                "[psub] 解析直接传入的内容失败:",
-                parseError.message,
-              );
-              parsedObj = { format: "unknown", data: null };
-            }
-          }
-          // 处理直接传入的节点链接（非HTTP URL）
-          if (
-            /^(ssr?|vmess1?|trojan|vless|hysteria|hysteria2|tg):\/\//.test(url2)
-          ) {
-            const newLink = replaceInUri(url2, replacements, false);
-            if (newLink) {
-              replacedURIs.push(newLink);
-              console.log(
-                "[psub] 直接节点链接已混淆:",
-                newLink.substring(0, 50),
-              );
-            }
-            continue;
-          }
-
-          // 确保 parsedObj 存在
-          if (!parsedObj) {
-            console.error("[psub] parsedObj 为空，跳过:", url2);
-            continue;
-          }
-
-          // 处理 base64 格式的订阅内容（HTTP获取或直接传入）
-          if (parsedObj && "base64" === parsedObj.format) {
-            const links = parsedObj.data
-              .split(/\r?\n/)
-              .filter((link) => link.trim() !== "");
-            console.log("[psub] base64格式, 节点数:", links.length);
-
-            if (links.length === 0) {
-              console.error("[psub] base64内容解析后无节点:", url2);
-              continue;
-            }
-
-            const newLinks = [];
-            let failCount = 0;
-            for (const link of links) {
-              try {
-                const newLink = replaceInUri(link, replacements, false);
-                if (newLink) {
-                  newLinks.push(newLink);
-                } else {
-                  failCount++;
-                  if (failCount <= 3) {
-                    console.log(
-                      "[psub] 节点处理返回空:",
-                      link.substring(0, 80),
-                    );
-                  }
-                }
-              } catch (replaceError) {
-                failCount++;
-                console.error(
-                  "[psub] 处理节点失败:",
-                  link.substring(0, 50),
-                  replaceError.message,
-                );
-              }
-            }
-
-            console.log(
-              "[psub] 节点处理结果: 总数",
-              links.length,
-              "成功",
-              newLinks.length,
-              "失败",
-              failCount,
-            );
-
-            if (newLinks.length === 0) {
-              console.error("[psub] 混淆后无有效节点:", url2);
-              // 如果全部失败，尝试存储原始内容
-              console.log("[psub] 尝试存储原始base64内容");
-              if (useMemoryCache) {
-                memoryCache.set(key, utf8ToBase64(parsedObj.data));
-              } else {
-                await SUB_BUCKET.put(key, utf8ToBase64(parsedObj.data));
-              }
-              keys.push(key);
-              replacedURIs.push(`${host}/${subDir}/${key}`);
-              console.log(
-                "[psub] 原始base64内容已存储:",
-                `${host}/${subDir}/${key}`,
-              );
-              continue;
-            }
-
-            const replacedBase64Data = utf8ToBase64(newLinks.join("\r\n"));
-            if (replacedBase64Data) {
-              if (useMemoryCache) {
-                memoryCache.set(key, replacedBase64Data);
-              } else {
-                await SUB_BUCKET.put(key, replacedBase64Data);
-              }
-              keys.push(key);
-              replacedURIs.push(`${host}/${subDir}/${key}`);
-              console.log(
-                "[psub] base64内容已混淆存储:",
-                `${host}/${subDir}/${key}`,
-              );
-            }
-          }
-          // 处理 yaml 格式的订阅内容（HTTP获取或直接传入）
-          else if (parsedObj && "yaml" === parsedObj.format) {
-            console.log(
-              "[psub] yaml格式, proxies数量:",
-              parsedObj.data.proxies?.length || 0,
-            );
-
-            if (
-              !parsedObj.data.proxies ||
-              parsedObj.data.proxies.length === 0
-            ) {
-              console.error("[psub] yaml内容无节点:", url2);
-              continue;
-            }
-
-            const replacedYAMLData = replaceYAML(parsedObj.data, replacements);
-            if (replacedYAMLData) {
-              if (useMemoryCache) {
-                memoryCache.set(key, replacedYAMLData);
-              } else {
-                await SUB_BUCKET.put(key, replacedYAMLData);
-              }
-              keys.push(key);
-              replacedURIs.push(`${host}/${subDir}/${key}`);
-              console.log(
-                "[psub] yaml内容已混淆存储:",
-                `${host}/${subDir}/${key}`,
-              );
-            }
-          }
-          // 对于HTTP URL获取的未知格式，直接存储原始内容
-          else if (url2.startsWith("https://") || url2.startsWith("http://")) {
-            console.log(
-              "[psub] HTTP订阅内容格式未知，直接存储:",
-              parsedObj.format,
-            );
-            if (useMemoryCache) {
-              memoryCache.set(key, plaintextData);
-            } else {
-              await SUB_BUCKET.put(key, plaintextData);
-            }
-            keys.push(key);
-            replacedURIs.push(`${host}/${subDir}/${key}`);
-            console.log("[psub] HTTP内容已存储:", `${host}/${subDir}/${key}`);
-          }
-        }
-      }
-
-      // 检查是否有有效内容
-      if (replacedURIs.length === 0) {
-        console.error("[psub] 错误: 所有订阅链接都无效或返回空内容");
-        let errorDetails =
-          "Error: All subscription links are invalid or returned empty content.\n\n";
-        if (failedURLs.length > 0) {
-          errorDetails += "Failed URLs:\n";
-          failedURLs.forEach((item, index) => {
-            errorDetails += `${index + 1}. ${item.url.substring(0, 100)}\n   Reason: ${item.reason}\n`;
-          });
-          errorDetails += "\n";
-        }
-        errorDetails +=
-          "Please check:\n" +
-          "1. The subscription URL is correct and accessible\n" +
-          "2. The subscription content is not empty\n" +
-          "3. The subscription format is supported (base64, yaml, or direct links)\n";
-        return new Response(errorDetails, {
-          status: 400,
-          headers: { "Content-Type": "text/plain; charset=utf-8" },
-        });
-      }
-
-      console.log("[psub] 成功处理, 有效订阅链接数:", replacedURIs.length);
-      const newUrl = replacedURIs.join("|");
-
-      // 保留原始请求的已知转换器参数，清洗并防止订阅链接参数泄露到顶层
-      const incomingParams = new URL(request.url).searchParams;
-      const originalParams = new URLSearchParams();
-      const whitelist = [
-        'target', 'config', 'emoji', 'list', 'udp', 'tfo', 'scv', 'fdn', 
-        'sort', 'dev', 'bd', 'insert', 'exclude', 'append_info', 'expand', 
-        'new_name', 'rename', 'filename', 'path', 'prefix', 'suffix', 'ver', 
-        'xudp', 'doh', 'rule', 'script', 'node', 'group', 'filter'
-      ];
-
-      for (const [key, value] of incomingParams.entries()) {
-        if (whitelist.includes(key)) {
-          originalParams.set(key, value);
-        }
-      }
-      originalParams.set("url", newUrl);
-
-      // 构建转发到后端的完整URL（保留所有原始参数：target, config, emoji, scv, fdn等）
-      const backendUrl =
-        backend + url.pathname + "?" + originalParams.toString();
-      console.log("[psub] 转发到后端:", backendUrl);
-      console.log("[psub] 处理后的订阅URL:", newUrl.substring(0, 200) + "...");
-      console.log("[psub] 所有参数:", Object.fromEntries(originalParams));
-
-      const modifiedRequest = new Request(backendUrl, {
-        method: "GET", // 订阅转换通常用GET
-        headers: {
-          "User-Agent":
-            request.headers.get("User-Agent") ||
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          Accept: "text/plain,application/json,application/x-yaml,*/*",
-          "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-          "Cache-Control": "no-cache",
-          Referer: host,
-        },
-      });
-
-      let rpResponse;
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 30000);
-        rpResponse = await fetch(modifiedRequest, {
-          signal: controller.signal,
-        });
-        clearTimeout(timeoutId);
-      } catch (error) {
-        console.error("[psub] 后端请求失败:", error);
-        return new Response("Backend request failed: " + error.message, {
-          status: 503,
-        });
-      }
-      console.log("[psub] 后端响应状态:", rpResponse.status);
-
-      if (rpResponse.status === 200) {
-        const plaintextData = await rpResponse.text();
-
-        // 检查后端返回是否为空
-        if (!plaintextData || plaintextData.trim().length === 0) {
-          console.error("[psub] 后端返回空内容");
-          return new Response(
-            "Error: Backend returned empty content. The subscription conversion may have failed.",
-            {
-              status: 502,
-              headers: { "Content-Type": "text/plain; charset=utf-8" },
-            },
-          );
-        }
-
-        // 检查后端返回是否包含错误信息
-        const lowerData = plaintextData.toLowerCase();
-        if (
-          (lowerData.includes("error") && lowerData.includes("not found")) ||
-          lowerData.includes("invalid") ||
-          lowerData.includes("failed") ||
-          plaintextData.length < 50
-        ) {
-          console.error(
-            "[psub] 后端可能返回错误页面:",
-            plaintextData.substring(0, 500),
-          );
-        }
-
-        console.log("[psub] 后端返回内容长度:", plaintextData.length);
-        console.log(
-          "[psub] 后端返回内容前200字符:",
-          plaintextData.substring(0, 200),
-        );
-
-        // 获取目标类型，判断是否需要恢复混淆
-        const target = url.searchParams.get("target") || "";
-
-        // 对于Clash和SingBox格式，直接返回（已经是明文配置）
-        if (
-          target === "clash" ||
-          target === "singbox" ||
-          plaintextData.includes("proxies:") ||
-          plaintextData.trim().startsWith("{")
-        ) {
-          console.log("[psub] 返回明文配置格式, target:", target);
-          const result = plaintextData.replace(
-            new RegExp(
-              Object.keys(replacements).map(escapeRegExp).join("|"),
-              "g",
-            ),
-            (match) => replacements[match] || match,
-          );
-          // 清理临时数据
-          for (const key of keys) {
-            if (useMemoryCache) {
-              memoryCache.delete(key);
-            } else {
-              await SUB_BUCKET.delete(key).catch(() => {});
-            }
-          }
-          return new Response(result, {
-            status: 200,
-            headers: {
-              "Content-Type":
-                target === "clash" || target === "singbox"
-                  ? "text/plain; charset=utf-8"
-                  : "application/x-yaml; charset=utf-8",
-              "Content-Disposition": "inline",
-              "Access-Control-Allow-Origin": "*",
-            },
-          });
-        }
-
-        // 对于其他格式（可能是base64编码的节点列表），尝试解码并恢复
-        try {
-          const decodedData = urlSafeBase64Decode(plaintextData);
-          const links = decodedData
-            .split(/\r?\n/)
-            .filter((link) => link.trim() !== "");
-          const newLinks = [];
-          for (const link of links) {
-            try {
-              const newLink = replaceInUri(link, replacements, true);
-              if (newLink) newLinks.push(newLink);
-            } catch (replaceError) {
-              console.error(
-                "[psub] 后端响应处理节点失败:",
-                link.substring(0, 50),
-                replaceError.message,
-              );
-            }
-          }
-          const replacedBase64Data = utf8ToBase64(newLinks.join("\r\n"));
-          // 清理临时数据
-          for (const key of keys) {
-            if (useMemoryCache) {
-              memoryCache.delete(key);
-            } else {
-              await SUB_BUCKET.delete(key).catch(() => {});
-            }
-          }
-          return new Response(replacedBase64Data, {
-            status: 200,
-            headers: {
-              "Content-Type": "text/plain; charset=utf-8",
-              "Content-Disposition": "inline",
-              "Access-Control-Allow-Origin": "*",
-            },
-          });
-        } catch (base64Error) {
-          // 不是base64，直接返回并恢复混淆
-          const result = plaintextData.replace(
-            new RegExp(
-              Object.keys(replacements).map(escapeRegExp).join("|"),
-              "g",
-            ),
-            (match) => replacements[match] || match,
-          );
-          // 清理临时数据
-          for (const key of keys) {
-            if (useMemoryCache) {
-              memoryCache.delete(key);
-            } else {
-              await SUB_BUCKET.delete(key).catch(() => {});
-            }
-          }
-          return new Response(result, {
-            status: 200,
-            headers: {
-              "Content-Type":
-                rpResponse.headers.get("Content-Type") ||
-                "text/plain; charset=utf-8",
-              "Content-Disposition": "inline",
-              "Access-Control-Allow-Origin": "*",
-            },
-          });
-        }
-      }
-
-      // 非200状态，记录错误并返回详细信息
-      const errorText = await rpResponse.text().catch(() => "No error details");
-      console.error(
-        "[psub] 后端错误响应:",
-        rpResponse.status,
-        errorText.substring(0, 500),
-      );
-      // 清理临时数据
-      for (const key of keys) {
-        if (useMemoryCache) {
-          memoryCache.delete(key);
-        } else {
-          await SUB_BUCKET.delete(key).catch(() => {});
-        }
-      }
-      return new Response(
-        `Backend error: ${rpResponse.status} ${rpResponse.statusText}\n\n${errorText.substring(0, 1000)}`,
-        { status: rpResponse.status },
-      );
-    } catch (globalError) {
-      // 清理存储的临时数据
-      for (const key of keys) {
-        if (useMemoryCache) {
-          memoryCache.delete(key);
-        } else {
-          await SUB_BUCKET.delete(key).catch(() => {});
-        }
-      }
-      console.error("[psub] 全局错误:", globalError);
-      return new Response(
-        `Internal Server Error: ${globalError.message}\n\nStack: ${globalError.stack}`,
-        {
-          status: 500,
-          headers: { "Content-Type": "text/plain; charset=utf-8" },
-        },
-      );
-    }
-  },
-};
-function replaceInUri(link, replacements, isRecovery) {
-  switch (true) {
-    case link.startsWith("ss://"):
-      return replaceSS(link, replacements, isRecovery);
-    case link.startsWith("ssr://"):
-      return replaceSSR(link, replacements, isRecovery);
-    case link.startsWith("vmess://"):
-    case link.startsWith("vmess1://"):
-      return replaceVmess(link, replacements, isRecovery);
-    case link.startsWith("trojan://"):
-    case link.startsWith("vless://"):
-      return replaceTrojan(link, replacements, isRecovery);
-    case link.startsWith("hysteria://"):
-      return replaceHysteria(link, replacements);
-    case link.startsWith("hysteria2://"):
-      return replaceHysteria2(link, replacements, isRecovery);
-    case link.startsWith("tg://"):
-      return replacetg(link, replacements, isRecovery);
-    case link.startsWith("socks://"):
-    case link.startsWith("socks5://"):
-      return replaceSocks(link, replacements, isRecovery);
-    default:
-      return;
+// --- Obfuscation & Recovery Logic ---
+function generateDeterministicRandomStr(input, len) {
+  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+  let result = "";
+  if (!input) input = Math.random().toString();
+  for (let i = 0; i < len; i++) {
+    const charCode = input.charCodeAt(i % input.length) + i;
+    result += chars.charAt(charCode % chars.length);
   }
+  return result;
 }
 
-function replacetg(link, replacements, isRecovery) {
+function generateDeterministicUUID(input) {
+  const seed = generateDeterministicRandomStr(input, 32);
+  let i = 0;
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
+    const r = parseInt(seed[i++], 36) % 16;
+    const v = c == "x" ? r : (r & 3) | 8;
+    return v.toString(16);
+  });
+}
+
+function escapeRegExp(string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function replaceInUri(link, replacements) {
+  if (link.startsWith("ss://")) return replaceSS(link, replacements);
+  if (link.startsWith("ssr://")) return replaceSSR(link, replacements);
+  if (link.startsWith("vmess://")) return replaceVmess(link, replacements);
+  if (link.startsWith("trojan://") || link.startsWith("vless://")) return replaceTrojan(link, replacements);
+  if (link.startsWith("hysteria://")) return replaceHysteria(link, replacements);
+  if (link.startsWith("hysteria2://")) return replaceHysteria2(link, replacements);
+  if (link.startsWith("socks://") || link.startsWith("socks5://")) return replaceSocks(link, replacements);
   return link;
 }
 
-function replaceSocks(link, replacements, isRecovery) {
-  // 移除协议前缀
-  let tempLink = link.replace(/^socks5?:\/\//, "");
-
-  // 分离 hash 部分
-  const hashIndex = tempLink.indexOf("#");
-  const hashPart = hashIndex !== -1 ? tempLink.slice(hashIndex) : "";
-  tempLink = hashIndex !== -1 ? tempLink.slice(0, hashIndex) : tempLink;
-
-  // 检查是否包含认证信息 (格式: base64(user:pass)@server:port)
-  const atIndex = tempLink.indexOf("@");
-
-  if (isRecovery) {
-    // 恢复模式：直接替换字符串中的fakeIP和密码
-    let result = link;
-    for (const [key, value] of Object.entries(replacements)) {
-      // 对于IP地址，使用全局替换
-      if (/^\d+\.\d+\.\d+\.\d+$/.test(key)) {
-        // IP地址替换
-        result = result.replace(new RegExp(escapeRegExp(key), "g"), value);
-      } else {
-        // 密码替换 - 使用单词边界匹配
-        const passRegex = new RegExp(
-          `(^|[^\\w])${escapeRegExp(key)}($|[^\\w])`,
-          "g",
-        );
-        result = result.replace(passRegex, (match, p1, p2) => p1 + value + p2);
-      }
-    }
-    console.log(
-      "[psub] SOCKS已恢复:",
-      link.substring(0, 50),
-      "->",
-      result.substring(0, 50),
-    );
-    return result;
-  }
-
-  // 混淆模式 - 使用私有IP地址代替随机域名，避免subconverter解析问题
-  const fakeIP = `10.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}`;
-  const randomPassword = generateRandomStr(12);
-  let replacedString;
-
-  if (atIndex !== -1) {
-    // 带认证的格式: base64@server:port
-    const authBase64 = tempLink.slice(0, atIndex);
-    const serverPort = tempLink.slice(atIndex + 1);
-
-    try {
-      const auth = atob(authBase64); // 解码得到 user:pass
-      const colonIndex = auth.indexOf(":");
-      const username = colonIndex !== -1 ? auth.slice(0, colonIndex) : auth;
-      const password = colonIndex !== -1 ? auth.slice(colonIndex + 1) : "";
-
-      // 提取服务器和端口 (支持IPv6)
-      const serverMatch = serverPort.match(
-        /^(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):(\d+)$/,
-      );
-      if (!serverMatch) {
-        console.log("[psub] replaceSocks: 无法匹配服务器地址:", serverPort);
-        return;
-      }
-      const server = serverMatch[1];
-      const port = serverMatch[2];
-
-      // 保存映射关系
-      replacements[fakeIP] = server;
-      if (password) replacements[randomPassword] = password;
-
-      // 生成新的认证信息
-      const newAuth = `${username}:${randomPassword}`;
-      const newAuthBase64 = utf8ToBase64(newAuth);
-
-      replacedString = `socks://${newAuthBase64}@${fakeIP}:${port}${hashPart}`;
-      console.log("[psub] SOCKS带认证已混淆:", server, "->", fakeIP);
-    } catch (e) {
-      console.log("[psub] replaceSocks: 认证信息解码失败:", e.message);
-      return;
-    }
-  } else {
-    // 无认证的格式: server:port
-    const serverMatch = tempLink.match(
-      /^(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):(\d+)$/,
-    );
-    if (!serverMatch) {
-      console.log("[psub] replaceSocks: 无法匹配服务器地址:", tempLink);
-      return;
-    }
-    const server = serverMatch[1];
-    const port = serverMatch[2];
-
-    // 保存映射关系
-    replacements[fakeIP] = server;
-
-    replacedString = `socks://${fakeIP}:${port}${hashPart}`;
-    console.log("[psub] SOCKS无认证已混淆:", server, "->", fakeIP);
-  }
-
-  return replacedString;
-}
-
-function replaceSSR(link, replacements, isRecovery) {
-  link = link.slice("ssr://".length).replace("\r", "").split("#")[0];
-  link = urlSafeBase64Decode(link);
-  // SSR格式: server:port:protocol:method:obfs:password/...
-  // 支持IPv6地址(带[]或不带)、域名、IPv4
-  const regexMatch = link.match(
-    /([\[\]\da-fA-F:\.]+|[\w\.-]+):(\d+?):(\S+?):(\S+?):(\S+?):(\S+)\//,
-  );
-  if (!regexMatch) {
-    console.log("[psub] replaceSSR: 无法匹配链接格式:", link.substring(0, 80));
-    return;
-  }
-  const [, server, , , , , password] = regexMatch;
-  let replacedString;
-  if (isRecovery) {
-    const originalPassword = replacements[urlSafeBase64Decode(password)];
-    const originalServer = replacements[server];
-    if (!originalPassword || !originalServer) {
-      console.log("[psub] replaceSSR: 恢复时找不到原始值，返回原链接");
-      return link;
-    }
-    replacedString =
-      "ssr://" +
-      urlSafeBase64Encode(
-        link
-          .replace(password, urlSafeBase64Encode(originalPassword))
-          .replace(server, originalServer),
-      );
-  } else {
-    const randomPassword = generateRandomStr(12);
-    const randomDomain = generateRandomStr(12) + ".com";
-    replacements[randomDomain] = server;
-    replacements[randomPassword] = urlSafeBase64Decode(password);
-    replacedString =
-      "ssr://" +
-      urlSafeBase64Encode(
-        link
-          .replace(server, randomDomain)
-          .replace(password, urlSafeBase64Encode(randomPassword)),
-      );
-  }
-  return replacedString;
-}
-function replaceVmess(link, replacements, isRecovery) {
-  const randomUUID = generateRandomUUID();
-  const randomDomain = generateRandomStr(10) + ".com";
-  const regexMatchRocketStyle = link.match(/vmess:\/\/([A-Za-z0-9-_]+)\?(.*)/);
-  if (regexMatchRocketStyle) {
-    const base64Data = regexMatchRocketStyle[1];
-    // 支持IPv6地址的正则: [IPv6]:port 或 hostname:port 或 IP:port
-    const regexMatch = urlSafeBase64Decode(base64Data).match(
-      /(.*?):(.*?)@(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):(.*)/,
-    );
-    if (!regexMatch) return;
-    const [, cipher, uuid, server, port] = regexMatch;
-    replacements[randomDomain] = server;
-    replacements[randomUUID] = uuid;
-    const newStr = urlSafeBase64Encode(
-      `${cipher}:${randomUUID}@${randomDomain}:${port}`,
-    );
-    const result = link.replace(base64Data, newStr);
-    return result;
-  }
-  // 支持IPv6地址的正则: [IPv6]:port 或 hostname:port 或 IP:port
-  const regexMatchKitsunebiStyle = link.match(
-    /vmess1:\/\/(.*?)@(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):(.*?)\?(.*)/,
-  );
-  if (regexMatchKitsunebiStyle) {
-    const [, uuid, server] = regexMatchKitsunebiStyle;
-    replacements[randomDomain] = server;
-    replacements[randomUUID] = uuid;
-    const regex = new RegExp(`${uuid}|${server}`, "g");
-    const result = link.replace(regex, (match) =>
-      cReplace(match, uuid, randomUUID, server, randomDomain),
-    );
-    return result;
-  }
-  let tempLink = link.replace(/vmess:\/\/|vmess1:\/\//g, "");
+function replaceSS(link, replacements) {
   try {
-    tempLink = urlSafeBase64Decode(tempLink);
-    const regexMatchQuanStyle = tempLink.match(/(.*?) = (.*)/);
-    if (regexMatchQuanStyle) {
-      const configs = regexMatchQuanStyle[2].split(",");
-      if (configs.length < 6) return;
-      const server2 = configs[1].trim();
-      const uuid2 = configs[4].trim().replace(/^"|"$/g, "");
-      replacements[randomDomain] = server2;
-      replacements[randomUUID] = uuid2;
-      const regex2 = new RegExp(`${uuid2}|${server2}`, "g");
-      const result2 = tempLink.replace(regex2, (match) =>
-        cReplace(match, uuid2, randomUUID, server2, randomDomain),
-      );
-      return "vmess://" + utf8ToBase64(result2);
-    }
-    const jsonData = JSON.parse(tempLink);
-    const server = jsonData.add;
-    const uuid = jsonData.id;
-    const regex = new RegExp(`${uuid}|${server}`, "g");
-    let result;
-    if (isRecovery) {
-      result = tempLink.replace(regex, (match) =>
-        cReplace(match, uuid, replacements[uuid], server, replacements[server]),
-      );
-    } else {
-      replacements[randomDomain] = server;
-      replacements[randomUUID] = uuid;
-      result = tempLink.replace(regex, (match) =>
-        cReplace(match, uuid, randomUUID, server, randomDomain),
-      );
-    }
-    return "vmess://" + utf8ToBase64(result);
-  } catch (error) {
-    return;
-  }
-}
-function replaceSS(link, replacements, isRecovery) {
-  const randomPassword = generateRandomStr(12);
-  const randomDomain = randomPassword + ".com";
-  let replacedString;
-  let tempLink = link.slice("ss://".length).split("#")[0];
-  if (tempLink.includes("@")) {
-    // 支持IPv6地址的正则: [IPv6]:port 或 hostname:port 或 IP:port
-    const regexMatch1 = tempLink.match(
-      /(\S+?)@(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):/,
-    );
-    if (!regexMatch1) {
-      console.log(
-        "[psub] replaceSS: 无法匹配链接格式(带@):",
-        link.substring(0, 80),
-      );
-      return;
-    }
-    const [, base64Data, server] = regexMatch1;
-    const regexMatch2 = urlSafeBase64Decode(base64Data).match(/(\S+?):(\S+)/);
-    if (!regexMatch2) {
-      return;
-    }
-    const [, encryption, password] = regexMatch2;
-    if (isRecovery) {
-      const originalPassword = replacements[password];
-      const originalServer = replacements[server];
-      if (!originalPassword || !originalServer) {
-        console.log("[psub] replaceSS: 恢复时找不到原始值，返回原链接");
-        return link;
-      }
-      const newStr = urlSafeBase64Encode(encryption + ":" + originalPassword);
-      replacedString = link
-        .replace(base64Data, newStr)
-        .replace(server, originalServer);
-    } else {
+    let tempLink = link.slice(5).split("#")[0];
+    if (tempLink.includes("@")) {
+      const match = tempLink.match(/(\S+?)@(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):(\d+)/);
+      if (!match) return link;
+      const [full, base64Data, server, port] = match;
+      const decoded = urlSafeBase64Decode(base64Data);
+      const parts = decoded.split(":");
+      if (parts.length < 2) return link;
+      const encryption = parts[0];
+      const password = parts.slice(1).join(":");
+      const randomPassword = generateDeterministicRandomStr(password, 12);
+      const randomDomain = generateDeterministicRandomStr(server, 10) + ".com";
       replacements[randomDomain] = server;
       replacements[randomPassword] = password;
       const newStr = urlSafeBase64Encode(encryption + ":" + randomPassword);
-      replacedString = link
-        .replace(base64Data, newStr)
-        .replace(/@.*:/, `@${randomDomain}:`);
+      return link.replace(base64Data, newStr).replace(server, randomDomain);
     }
-  } else {
-    try {
-      const decodedValue = urlSafeBase64Decode(tempLink);
-      // 支持IPv6地址的正则: [IPv6]:port 或 hostname:port 或 IP:port
-      const regexMatch = decodedValue.match(
-        /(\S+?):(\S+)@(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):/,
-      );
-      if (!regexMatch) {
-        console.log(
-          "[psub] replaceSS: 无法匹配链接格式(无@):",
-          link.substring(0, 80),
-        );
-        return;
-      }
-      const [, , password, server] = regexMatch;
-      replacements[randomDomain] = server;
-      replacements[randomPassword] = password;
-      replacedString =
-        "ss://" +
-        urlSafeBase64Encode(
-          decodedValue
-            .replace(/:.*@/, `:${randomPassword}@`)
-            .replace(/@.*:/, `@${randomDomain}:`),
-        );
-      const hashPart = link.match(/#.*/);
-      if (hashPart) replacedString += hashPart[0];
-    } catch (error) {
-      return;
-    }
-  }
-  return replacedString;
+  } catch (e) {}
+  return link;
 }
-function replaceTrojan(link, replacements, isRecovery) {
-  const randomUUID = generateRandomUUID();
-  const randomDomain = generateRandomStr(10) + ".com";
-  // 支持IPv6地址的正则: [IPv6]:port 或 hostname:port 或 IP:port
-  const regexMatch = link.match(
-    /(vless|trojan):\/\/(.*?)@(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):/,
-  );
-  if (!regexMatch) {
-    console.log(
-      "[psub] replaceTrojan: 无法匹配链接格式:",
-      link.substring(0, 80),
-    );
-    return;
-  }
-  const [, , uuid, server] = regexMatch;
-  const regex = new RegExp(`${uuid}|${server}`, "g");
-  if (isRecovery) {
-    const originalUUID = replacements[uuid];
-    const originalServer = replacements[server];
-    if (!originalUUID || !originalServer) {
-      console.log("[psub] replaceTrojan: 恢复时找不到原始值，返回原链接");
-      return link;
-    }
-    return link.replace(regex, (match) =>
-      cReplace(match, uuid, originalUUID, server, originalServer),
-    );
-  } else {
+
+function replaceVmess(link, replacements) {
+  try {
+    let tempLink = link.replace("vmess://", "");
+    const decoded = urlSafeBase64Decode(tempLink);
+    const jsonData = JSON.parse(decoded);
+    const server = jsonData.add;
+    const uuid = jsonData.id;
+    const randomDomain = generateDeterministicRandomStr(server, 10) + ".com";
+    const randomUUID = generateDeterministicUUID(uuid);
     replacements[randomDomain] = server;
     replacements[randomUUID] = uuid;
-    return link.replace(regex, (match) =>
-      cReplace(match, uuid, randomUUID, server, randomDomain),
-    );
-  }
+    jsonData.add = randomDomain;
+    jsonData.id = randomUUID;
+    return "vmess://" + utf8ToBase64(JSON.stringify(jsonData));
+  } catch (e) {}
+  return link;
 }
+
+function replaceTrojan(link, replacements) {
+  try {
+    const match = link.match(/(vless|trojan):\/\/(.*?)@(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):(\d+)/);
+    if (!match) return link;
+    const [full, proto, uuid, server, port] = match;
+    const randomDomain = generateDeterministicRandomStr(server, 10) + ".com";
+    const randomUUID = generateDeterministicUUID(uuid);
+    replacements[randomDomain] = server;
+    replacements[randomUUID] = uuid;
+    return link.replace(uuid, randomUUID).replace(server, randomDomain);
+  } catch (e) {}
+  return link;
+}
+
+function replaceSSR(link, replacements) {
+  try {
+    let data = link.slice(6).replace("\r", "").split("#")[0];
+    let decoded = urlSafeBase64Decode(data);
+    const match = decoded.match(/([\[\]\da-fA-F:\.]+|[\w\.-]+):(\d+?):(\S+?):(\S+?):(\S+?):(\S+)\//);
+    if (!match) return link;
+    const [, server, port, proto, method, obfs, password] = match;
+    const randomDomain = generateDeterministicRandomStr(server, 12) + ".com";
+    const plainPass = urlSafeBase64Decode(password);
+    const randomPass = generateDeterministicRandomStr(plainPass, 12);
+    replacements[randomDomain] = server;
+    replacements[randomPass] = plainPass;
+    return "ssr://" + urlSafeBase64Encode(decoded.replace(server, randomDomain).replace(password, urlSafeBase64Encode(randomPass)));
+  } catch (e) {}
+  return link;
+}
+
+function replaceSocks(link, replacements) {
+  try {
+    let temp = link.replace(/^socks5?:\/\//, "");
+    const hashSplit = temp.split("#");
+    const hashPart = hashSplit.length > 1 ? "#" + hashSplit[1] : "";
+    temp = hashSplit[0];
+    const atIndex = temp.indexOf("@");
+    if (atIndex !== -1) {
+      const authBase64 = temp.slice(0, atIndex);
+      const serverPort = temp.slice(atIndex + 1);
+      const auth = atob(authBase64);
+      const [user, pass] = auth.split(":");
+      const serverMatch = serverPort.match(/^(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):(\d+)$/);
+      if (!serverMatch) return link;
+      const [, server, port] = serverMatch;
+      const randomDomain = generateDeterministicRandomStr(server, 10) + ".com";
+      const randomPass = generateDeterministicRandomStr(pass || user, 12);
+      replacements[randomDomain] = server;
+      if (pass) replacements[randomPass] = pass;
+      const newAuth = utf8ToBase64(user + ":" + (pass ? randomPass : ""));
+      return `socks://${newAuth}@${randomDomain}:${port}${hashPart}`;
+    } else {
+      const serverMatch = temp.match(/^(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):(\d+)$/);
+      if (!serverMatch) return link;
+      const [, server, port] = serverMatch;
+      const randomDomain = generateDeterministicRandomStr(server, 10) + ".com";
+      replacements[randomDomain] = server;
+      return `socks://${randomDomain}:${port}${hashPart}`;
+    }
+  } catch (e) {}
+  return link;
+}
+
+function replaceHysteria(link, replacements) {
+  const match = link.match(/hysteria:\/\/(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):/);
+  if (!match) return link;
+  const server = match[1];
+  const randomDomain = generateDeterministicRandomStr(server, 12) + ".com";
+  replacements[randomDomain] = server;
+  return link.replace(server, randomDomain);
+}
+
+function replaceHysteria2(link, replacements) {
+  const match = link.match(/(hysteria2):\/\/(.*)@(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):/);
+  if (!match) return link;
+  const [full, proto, uuid, server] = match;
+  const randomDomain = generateDeterministicRandomStr(server, 10) + ".com";
+  const randomUUID = generateDeterministicUUID(uuid);
+  replacements[randomDomain] = server;
+  replacements[randomUUID] = uuid;
+  return link.replace(uuid, randomUUID).replace(server, randomDomain);
+}
+
+function replaceYAMLContent(content, replacements) {
+  let result = content;
+  const serverRegex = /server:\s*(\S+)/g;
+  result = result.replace(serverRegex, (match, server) => {
+    if (server.includes(".") || server.includes(":")) {
+       const randomDomain = generateDeterministicRandomStr(server, 12) + ".com";
+       replacements[randomDomain] = server;
+       return `server: ${randomDomain}`;
+    }
+    return match;
+  });
+  const uuidRegex = /uuid:\s*(\S+)/g;
+  result = result.replace(uuidRegex, (match, uuid) => {
+    const randomUUID = generateDeterministicUUID(uuid);
+    replacements[randomUUID] = uuid;
+    return `uuid: ${randomUUID}`;
+  });
+  const passRegex = /password:\s*(\S+)/g;
+  result = result.replace(passRegex, (match, pass) => {
+    const randomPass = generateDeterministicRandomStr(pass, 12);
+    replacements[randomPass] = pass;
+    return `password: ${randomPass}`;
+  });
+  return result;
+}
+
+async function handleFetchRequest(request, env) {
+  const url = new URL(request.url);
+  const host = url.origin;
+  const subDir = 'subscription';
+  const BACKEND_API_URL = env.BACKEND || "https://url.v1.mk";
+  const backend = BACKEND_API_URL.replace(/(https?:\/\/[^/]+).*$/, "$1");
+
+  // Home Page
+  if (url.pathname === '/' || url.pathname === '/index.html') {
+    const frontendUrl = "https://raw.githubusercontent.com/lizhi123le/psub/refs/heads/main/index.html";
+    const res = await fetch(frontendUrl);
+    if (res.ok) {
+      let html = await res.text();
+      html = html.replace(/https:\/\/bulianglin2023\.dev/g, host);
+      html = html.replace(/bulianglin2023\.dev/g, url.host);
+      return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+    }
+    return new Response("Home page loaded", { status: 200 });
+  }
+
+  // Version
+  if (url.pathname === "/version") {
+    const response = await fetch(`${backend}/version`);
+    return new Response(await response.text(), { status: response.status, headers: { "Content-Type": "text/plain", "Access-Control-Allow-Origin": "*" } });
+  }
+
+  // Stateless Proxy
+  if (url.pathname.startsWith(`/${subDir}/B64_`)) {
+    const key = url.pathname.split("/").pop();
+    if (key && key.startsWith("B64_")) {
+      try {
+        const encoded = key.substring(4);
+        const padded = encoded + '='.repeat((4 - (encoded.length % 4)) % 4);
+        const originalUrl = atob(encoded.replace(/-/g, '+').replace(/_/g, '/'));
+        const response = await fetch(originalUrl, { headers: { 'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0' } });
+        if (!response.ok) return new Response(`Error: ${response.status}`, { status: response.status });
+        let content = await response.text();
+        const replacements = {};
+        const parsed = parseData(content);
+        if (parsed.format === "base64") {
+          const links = parsed.data.split(/\r?\n/).filter(l => l.trim());
+          const obfuscatedLinks = links.map(l => replaceInUri(l, replacements));
+          content = utf8ToBase64(obfuscatedLinks.join("\n"));
+        } else if (parsed.format === "yaml") {
+          content = replaceYAMLContent(content, replacements);
+        }
+        return new Response(content, { headers: { "Content-Type": "text/plain; charset=utf-8", "Access-Control-Allow-Origin": "*" } });
+      } catch (e) {
+        return new Response(`Error: ${e.message}`, { status: 500 });
+      }
+    }
+  }
+
+  // Subscription Conversion
+  if (url.pathname === "/sub" || url.pathname.startsWith("/sub")) {
+    const targetUrl = url.searchParams.get("url");
+    if (!targetUrl) {
+      const backendUrl = `${backend}/sub${url.search}`;
+      const response = await fetch(backendUrl);
+      return new Response(await response.text(), { status: response.status, headers: { "Content-Type": "text/plain; charset=utf-8", "Access-Control-Allow-Origin": "*" } });
+    }
+
+    const replacements = {};
+    const replacedURIs = [];
+    const urlParts = targetUrl.split('|').filter(part => part.trim() !== '');
+
+    for (const part of urlParts) {
+      if (part.startsWith('https://') || part.startsWith('http://')) {
+        const encodedUrl = btoa(part).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        replacedURIs.push(`${host}/${subDir}/B64_${encodedUrl}`);
+      } else {
+        replacedURIs.push(replaceInUri(part, replacements));
+      }
+    }
+
+    if (replacedURIs.length === 0) return new Response('No valid links', { status: 400 });
+
+    const newUrl = replacedURIs.join('|');
+    const incomingParams = new URL(request.url).searchParams;
+    const originalParams = new URLSearchParams();
+    const whitelist = ['target', 'config', 'emoji', 'list', 'udp', 'tfo', 'scv', 'fdn', 'sort', 'dev', 'bd', 'insert', 'exclude', 'append_info', 'expand', 'new_name', 'rename', 'filename', 'path', 'prefix', 'suffix', 'ver', 'xudp', 'doh', 'rule', 'script', 'node', 'group', 'filter'];
+    for (const [key, value] of incomingParams.entries()) { if (whitelist.includes(key)) originalParams.set(key, value); }
+    originalParams.set('url', newUrl);
+
+    const backendUrl = `${backend}/sub?${originalParams.toString()}`;
+    const response = await fetch(backendUrl, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' } });
+    if (!response.ok) return new Response(await response.text(), { status: response.status });
+
+    let content = await response.text();
+    if (Object.keys(replacements).length > 0) {
+      const recoveryRegex = new RegExp(Object.keys(replacements).map(escapeRegExp).join("|"), "g");
+      const target = url.searchParams.get("target");
+      try {
+        const decoded = urlSafeBase64Decode(content);
+        if (decoded && (decoded.includes("://") || decoded.includes("proxies:") || decoded.includes("port:"))) {
+          const recovered = decoded.replace(recoveryRegex, (match) => replacements[match] || match);
+          content = (target === "base64") ? utf8ToBase64(recovered) : recovered;
+        } else {
+          content = content.replace(recoveryRegex, (match) => replacements[match] || match);
+        }
+      } catch (e) { content = content.replace(recoveryRegex, (match) => replacements[match] || match); }
+    }
+    return new Response(content, { status: 200, headers: { "Content-Type": "text/plain; charset=utf-8", "Access-Control-Allow-Origin": "*" } });
+  }
+
+  return new Response("Not Found", { status: 404 });
+}
+
+export default {
+  async fetch(request, env) {
+    return await handleFetchRequest(request, env);
+  }
+};
 function replaceHysteria(link, replacements) {
   // 支持IPv6地址: [IPv6]:port 或 hostname:port 或 IP:port
   const regexMatch = link.match(

@@ -258,11 +258,17 @@ function replaceHysteria(link, replacements, isRecovery) {
 }
 
 function replaceHysteria2(link, replacements, isRecovery) {
+  const randomDomain = generateDeterministicRandomStr(server, 12) + ".com";
+  replacements[randomDomain] = server;
+  return link.replace(server, randomDomain);
+}
+
+function replaceHysteria2(link, replacements) {
   const match = link.match(/(hysteria2):\/\/(.*)@(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):/);
   if (!match) return link;
   const [full, proto, uuid, server] = match;
-  const randomDomain = generateRandomStr(10) + ".com";
-  const randomUUID = generateRandomUUID();
+  const randomDomain = generateDeterministicRandomStr(server, 10) + ".com";
+  const randomUUID = generateDeterministicUUID(uuid);
   replacements[randomDomain] = server;
   replacements[randomUUID] = uuid;
   return link.replace(uuid, randomUUID).replace(server, randomDomain);
@@ -270,10 +276,11 @@ function replaceHysteria2(link, replacements, isRecovery) {
 
 function replaceYAMLContent(content, replacements) {
   let result = content;
+  // Use non-global but iterative replacement to build replacements map
   const serverRegex = /server:\s*(\S+)/g;
   result = result.replace(serverRegex, (match, server) => {
     if (server.includes(".") || server.includes(":")) {
-       const randomDomain = generateRandomStr(12) + ".com";
+       const randomDomain = generateDeterministicRandomStr(server, 12) + ".com";
        replacements[randomDomain] = server;
        return `server: ${randomDomain}`;
     }
@@ -281,13 +288,13 @@ function replaceYAMLContent(content, replacements) {
   });
   const uuidRegex = /uuid:\s*(\S+)/g;
   result = result.replace(uuidRegex, (match, uuid) => {
-    const randomUUID = generateRandomUUID();
+    const randomUUID = generateDeterministicUUID(uuid);
     replacements[randomUUID] = uuid;
     return `uuid: ${randomUUID}`;
   });
   const passRegex = /password:\s*(\S+)/g;
   result = result.replace(passRegex, (match, pass) => {
-    const randomPass = generateRandomStr(12);
+    const randomPass = generateDeterministicRandomStr(pass, 12);
     replacements[randomPass] = pass;
     return `password: ${randomPass}`;
   });
@@ -304,7 +311,7 @@ function getHost(request) {
 async function processSubscription(request, url, backend) {
   const host = getHost(request);
   const subDir = 'subscription';
-  const targetUrl = getFullUrl(request.url);
+  const targetUrl = url.searchParams.get('url');
   const target = url.searchParams.get('target');
 
   if (!targetUrl) {
@@ -327,93 +334,35 @@ async function processSubscription(request, url, backend) {
 
   const replacements = {};
   const replacedURIs = [];
-  const keys = [];
-  const urlPartList = targetUrl.split('|').filter(part => part.trim() !== '');
+  const urlParts = targetUrl.split('|').filter(part => part.trim() !== '');
 
-  if (urlPartList.length === 0) {
-    return new Response('There are no valid links', { status: 400 });
-  }
-
-  for (const urlPart of urlPartList) {
-    if (urlPart.startsWith('https://') || urlPart.startsWith('http://')) {
+  for (const part of urlParts) {
+    if (part.startsWith('https://') || part.startsWith('http://')) {
       // Stateless Proxy: Encode the URL into the path to avoid Vercel edge cache-miss (404/400)
-      // We use 'B64_' prefix to identify encoded URLs
-      const encodedUrl = btoa(urlPart).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      const encodedUrl = btoa(part).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
       replacedURIs.push(`${host}/${subDir}/B64_${encodedUrl}`);
-      continue;
-    }
-
-    const key = generateRandomStr(16);
-    let plaintextData = "";
-
-    if (urlPart.startsWith('https://') || urlPart.startsWith('http://')) {
-      try {
-        const response = await fetch(urlPart, {
-          method: 'GET',
-          headers: {
-            'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0',
-          }
-        });
-        if (response.ok) {
-          plaintextData = await response.text();
-          responseHeaders = Object.fromEntries(response.headers);
-        }
-      } catch (e) {
-        console.error('Fetch error:', e.message);
-        continue;
-      }
     } else {
-      plaintextData = urlPart;
-    }
-
-    if (plaintextData) {
-      const parsed = parseData(plaintextData);
-      let obfuscatedData = plaintextData;
-
-      if (parsed.format === 'base64') {
-        const links = parsed.data.split(/\r?\n/).filter(link => link.trim() !== '');
-        const newLinks = [];
-        for (const link of links) {
-          newLinks.push(replaceInUri(link, replacements, false));
-        }
-        obfuscatedData = utf8ToBase64(newLinks.join('\r\n'));
-      } else if (parsed.format === 'yaml') {
-        obfuscatedData = replaceYAMLContent(plaintextData, replacements);
-      }
-
-      memoryCache.set(key, obfuscatedData);
-      memoryCache.set(key + '_headers', JSON.stringify(responseHeaders || { 'Content-Type': 'text/plain;charset=UTF-8' }));
-      keys.push(key);
-      replacedURIs.push(`${host}/${subDir}/${key}`);
+      // Direct node content obfuscation
+      const obfuscated = replaceInUri(part, replacements);
+      replacedURIs.push(obfuscated);
     }
   }
 
   if (replacedURIs.length === 0) {
-    return new Response('Error: No valid nodes found', { status: 400 });
+    return new Response('No valid links', { status: 400 });
   }
 
-  // If there's a target parameter, forward to backend for conversion
-  if (target) {
-    return await forwardToBackend(request, url, backend, host, subDir, replacements, keys, replacedURIs);
-  }
-
-  const result = utf8ToBase64(replacedURIs.join('\r\n'));
-  return new Response(result, {
-    headers: {
-      'Content-Type': 'text/plain',
-      'Access-Control-Allow-Origin': '*',
-    }
-  });
+  return await forwardToBackend(request, url, backend, host, subDir, replacements, replacedURIs);
 }
 
 // Forward to backend for conversion, then restore original node details
-async function forwardToBackend(request, url, backend, host, subDir, replacements, keys, replacedURIs) {
+async function forwardToBackend(request, url, backend, host, subDir, replacements, replacedURIs) {
   try {
     const newUrl = replacedURIs.join('|');
     const incomingParams = new URL(request.url).searchParams;
     const originalParams = new URLSearchParams();
     
-    // Strict whitelist of psub / subconverter parameters - Only these go to the backend
+    // Strict whitelist of psub / subconverter parameters
     const whitelist = [
       'target', 'config', 'emoji', 'list', 'udp', 'tfo', 'scv', 'fdn', 
       'sort', 'dev', 'bd', 'insert', 'exclude', 'append_info', 'expand', 
@@ -426,8 +375,6 @@ async function forwardToBackend(request, url, backend, host, subDir, replacement
         originalParams.set(key, value);
       }
     }
-    
-    // Replace the 'url' param with our clean internal proxy URL
     originalParams.set('url', newUrl);
     
     const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
@@ -436,17 +383,17 @@ async function forwardToBackend(request, url, backend, host, subDir, replacement
     const response = await fetch(backendUrl, {
       method: 'GET',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       }
     });
 
     if (!response.ok) {
-      return new Response(`Backend error: ${response.status}`, { status: response.status });
+        return new Response(await response.text(), { status: response.status });
     }
 
     let content = await response.text();
     
-    // Recovery mapping
+    // --- Recovery Phase ---
     if (Object.keys(replacements).length > 0) {
       const recoveryRegex = new RegExp(
         Object.keys(replacements).map(escapeRegExp).join("|"),
@@ -459,23 +406,13 @@ async function forwardToBackend(request, url, backend, host, subDir, replacement
         const decoded = urlSafeBase64Decode(content);
         if (decoded && (decoded.includes("://") || decoded.includes("proxies:") || decoded.includes("port:"))) {
           const recovered = decoded.replace(recoveryRegex, (match) => replacements[match] || match);
-          if (target === "base64") {
-            content = utf8ToBase64(recovered);
-          } else {
-            content = recovered;
-          }
+          content = (target === "base64") ? utf8ToBase64(recovered) : recovered;
         } else {
           content = content.replace(recoveryRegex, (match) => replacements[match] || match);
         }
       } catch (e) {
         content = content.replace(recoveryRegex, (match) => replacements[match] || match);
       }
-    }
-    
-    // Cleanup cache
-    for (const key of keys) {
-      memoryCache.delete(key);
-      memoryCache.delete(key + '_headers');
     }
 
     return new Response(content, {
@@ -493,44 +430,23 @@ async function forwardToBackend(request, url, backend, host, subDir, replacement
 export default async function handler(request) {
   const url = new URL(request.url);
   const host = getHost(request);
+  const subDir = 'subscription';
 
-  // Root - return index.html with domain replacement
-  if (url.pathname === '/' || url.pathname === '') {
+  // Home page handler
+  if (url.pathname === '/' || url.pathname === '/index.html') {
     try {
-      // In Edge Function, we need to fetch the index.html from the same origin
-      const indexUrl = `${host}/index.html`;
-      const response = await fetch(indexUrl);
-      
-      if (response.ok) {
-        let html = await response.text();
-        
-        // Replace bulianglin2023.dev with current host - handle multiple formats
-        // Format 1: https://bulianglin2023.dev
+      const indexUrl = new URL('./index.html', import.meta.url);
+      const res = await fetch(indexUrl);
+      if (res.ok) {
+        let html = await res.text();
         html = html.replace(/https:\/\/bulianglin2023\.dev/g, host);
-        // Format 2: bulianglin2023.dev (without protocol)
         html = html.replace(/bulianglin2023\.dev/g, url.host);
-        // Format 3: URL encoded version
         html = html.replace(/https%3A%2F%2Fbulianglin2023\.dev/g, encodeURIComponent(host));
-        
-        return new Response(html, {
-          headers: { 'Content-Type': 'text/html; charset=utf-8' }
-        });
+        return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
       }
-    } catch (e) {
-      console.error('Error loading index.html:', e);
-    }
+    } catch (e) {}
     
-    // Fallback to simple page
-    return new Response(`<!DOCTYPE html>
-<html>
-<head><title>psub</title></head>
-<body>
-<h1>psub - Subscription Converter</h1>
-<p>Backend API is running correctly.</p>
-<p>Use: /sub?url=YOUR_SUBSCRIPTION_URL</p>
-<p>Version: /version</p>
-</body>
-</html>`, {
+    return new Response(`<!DOCTYPE html><html><head><title>psub</title></head><body><h1>psub</h1><p>Running.</p></body></html>`, {
       headers: { 'Content-Type': 'text/html; charset=utf-8' }
     });
   }
@@ -539,54 +455,18 @@ export default async function handler(request) {
   if (url.pathname === '/version') {
     try {
       const backend = BACKEND.replace(/(https?:\/\/[^/]+).*$/, "$1");
-      const response = await fetch(`${backend}/version`, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0'
-        }
-      });
-
-      if (response.ok) {
-        const text = await response.text();
-        if (text && text.trim().length > 1) {
-          return new Response(text.trim(), {
-            status: 200,
-            headers: {
-              'Content-Type': 'text/plain; charset=utf-8',
-              'Access-Control-Allow-Origin': '*'
-            }
-          });
-        }
-      }
-      
-      // If response not ok, return error with backend info
-      return new Response(`Error: Backend returned ${response.status}`, {
-        status: 200,
-        headers: {
-          'Content-Type': 'text/plain; charset=utf-8',
-          'Access-Control-Allow-Origin': '*'
-        }
-      });
+      const response = await fetch(`${backend}/version`);
+      return new Response(await response.text(), { status: response.status, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Access-Control-Allow-Origin': '*' } });
     } catch (e) {
-      console.error('Version fetch error:', e);
-      return new Response(`Error: ${e.message}`, {
-        status: 200,
-        headers: {
-          'Content-Type': 'text/plain; charset=utf-8',
-          'Access-Control-Allow-Origin': '*'
-        }
-      });
+      return new Response(`Error: ${e.message}`, { status: 500 });
     }
   }
 
-  // Subscription content endpoint
+  // Subscription content endpoint (Stateless Proxy with Obfuscation)
   if (url.pathname.startsWith('/subscription/')) {
     const key = url.pathname.replace('/subscription/', '');
+    if (!key) return new Response('Invalid key', { status: 400 });
 
-    if (!key || key.includes('/') || key.includes('..')) {
-      return new Response('Invalid key', { status: 400 });
-    }
-
-    // Handle Stateless Proxy
     if (key.startsWith('B64_')) {
       try {
         const encoded = key.substring(4);
@@ -594,43 +474,34 @@ export default async function handler(request) {
         const originalUrl = atob(padded.replace(/-/g, '+').replace(/_/g, '/'));
         
         const response = await fetch(originalUrl, {
-          headers: {
-            'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          }
+          headers: { 'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0' }
         });
 
-        if (!response.ok) {
-          return new Response(`Error fetching subscription: ${response.status}`, { status: response.status });
-        }
+        if (!response.ok) return new Response(`Error: ${response.status}`, { status: response.status });
 
-        const content = await response.text();
-        const responseHeaders = new Headers(response.headers);
-        responseHeaders.set('Access-Control-Allow-Origin', '*');
+        let content = await response.text();
+        
+        // --- Obfuscate Remote Content on the fly ---
+        const replacements = {}; 
+        // Note: For remote content, the primary requester psub will handle recovery.
+        // But the internal proxy needs to return OBFUSCATED content to the backend.
+        const parsed = parseData(content);
+        if (parsed.format === "base64") {
+          const links = parsed.data.split(/\r?\n/).filter(l => l.trim());
+          const obfuscatedLinks = links.map(l => replaceInUri(l, replacements));
+          content = utf8ToBase64(obfuscatedLinks.join("\n"));
+        } else if (parsed.format === "yaml") {
+          content = replaceYAMLContent(content, replacements);
+        }
         
         return new Response(content, {
-          status: 200,
-          headers: responseHeaders
+          headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Access-Control-Allow-Origin': '*' }
         });
       } catch (e) {
         return new Response(`Error: ${e.message}`, { status: 500 });
       }
     }
-
-    const content = memoryCache.get(key);
-    const headersStr = memoryCache.get(key + '_headers');
-
-    if (!content) {
-      return new Response('Not Found', { status: 404 });
-    }
-
-    const headers = headersStr ? JSON.parse(headersStr) : { 'Content-Type': 'text/plain;charset=UTF-8' };
-
-    return new Response(content, {
-      headers: {
-        ...headers,
-        'Access-Control-Allow-Origin': '*',
-      }
-    });
+    return new Response('Not Found', { status: 404 });
   }
 
   // Subscription conversion endpoint
@@ -638,5 +509,5 @@ export default async function handler(request) {
     return await processSubscription(request, url, BACKEND);
   }
 
-  return new Response('Not found', { status: 404 });
+  return new Response('Not Found', { status: 404 });
 }
