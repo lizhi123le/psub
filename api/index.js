@@ -258,7 +258,21 @@ async function processSubscription(request, url, backend) {
   const target = url.searchParams.get('target');
 
   if (!targetUrl) {
-    return Response.redirect(host, 302);
+    const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
+    const backendUrl = `${backendBase}/sub${url.search}`;
+    const response = await fetch(backendUrl, {
+      method: 'GET',
+      headers: {
+        'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0',
+      }
+    });
+    return new Response(await response.text(), {
+      status: response.status,
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Access-Control-Allow-Origin': '*',
+      }
+    });
   }
 
   const replacements = {};
