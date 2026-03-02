@@ -3854,16 +3854,6 @@ var src_default = {
           return new Response("There are no valid links", { status: 400 });
         let response, parsedObj, plaintextData;
         for (const url2 of urlParts) {
-          // If target is present, bypass local processing for remote URLs to avoid 400 error on Vercel (Edge state loss)
-          const target = url.searchParams.get("target");
-          if (
-            target &&
-            (url2.startsWith("https://") || url2.startsWith("http://"))
-          ) {
-            replacedURIs.push(url2);
-            continue;
-          }
-
           const key = generateRandomStr(16);
           if (url2.startsWith("https://") || url2.startsWith("http://")) {
             console.log("[psub] 获取订阅:", url2);

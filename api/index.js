@@ -328,19 +328,13 @@ async function processSubscription(request, url, backend) {
   const replacements = {};
   const replacedURIs = [];
   const keys = [];
-  const urlParts = targetUrl.split('|').filter(part => part.trim() !== '');
+  const urlPartList = targetUrl.split('|').filter(part => part.trim() !== '');
 
-  if (urlParts.length === 0) {
+  if (urlPartList.length === 0) {
     return new Response('There are no valid links', { status: 400 });
   }
 
-  for (const urlPart of urlParts) {
-    // If target is present, bypass local processing for remote URLs to avoid 400 error on Vercel (Edge state loss)
-    if (target && (urlPart.startsWith('https://') || urlPart.startsWith('http://'))) {
-      replacedURIs.push(urlPart);
-      continue;
-    }
-
+  for (const urlPart of urlPartList) {
     const key = generateRandomStr(16);
     let plaintextData = "";
     let responseHeaders = {};
@@ -412,7 +406,7 @@ async function forwardToBackend(request, url, backend, host, subDir, replacement
     const incomingParams = new URL(request.url).searchParams;
     const originalParams = new URLSearchParams();
     
-    // Strict whitelist of psub / subconverter parameters to keep
+    // Strict whitelist of psub / subconverter parameters - Only these go to the backend
     const whitelist = [
       'target', 'config', 'emoji', 'list', 'udp', 'tfo', 'scv', 'fdn', 
       'sort', 'dev', 'bd', 'insert', 'exclude', 'append_info', 'expand', 
@@ -426,6 +420,7 @@ async function forwardToBackend(request, url, backend, host, subDir, replacement
       }
     }
     
+    // Replace the 'url' param with our clean internal proxy URL
     originalParams.set('url', newUrl);
     
     const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
