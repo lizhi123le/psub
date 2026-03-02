@@ -70,12 +70,17 @@ function getFullUrl(requestUrl) {
   const search = url.search;
   if (!search) return url.searchParams.get('url');
 
-  // psub / subconverter top-level reserved parameters
-  const reserved = ['target=', 'config=', 'emoji=', 'list=', 'udp=', 'tfo=', 'scv=', 'fdn=', 'sort=', 'dev=', 'bd=', 'insert=', 'exclude=', 'append_info=', 'expand=', 'new_name=', 'rename=', 'filename='];
+  // psub / subconverter top-level reserved parameters - extended list
+  const reserved = [
+    'target=', 'config=', 'emoji=', 'list=', 'udp=', 'tfo=', 'scv=', 'fdn=', 
+    'sort=', 'dev=', 'bd=', 'insert=', 'exclude=', 'append_info=', 'expand=', 
+    'new_name=', 'rename=', 'filename=', 'path=', 'prefix=', 'suffix=', 'ver=',
+    'xudp=', 'doh=', 'rule=', 'script=', 'node=', 'group=', 'filter='
+  ];
   
   let searchStr = search.substring(1);
   let urlStart = -1;
-  const urlKeys = ['url=', 'sub=']; // Support both url and sub
+  const urlKeys = ['url=', 'sub=']; 
   
   for (const k of urlKeys) {
     let idx = searchStr.indexOf(k);
@@ -98,6 +103,13 @@ function getFullUrl(requestUrl) {
   }
 
   let finalUrl = remaining.substring(0, bestCut);
+  
+  // If the captured URL looks like it was encoded (contains % or ://), let standard get handle it if it worked better
+  const stdUrl = url.searchParams.get('url');
+  if (stdUrl && stdUrl.includes('://') && stdUrl.length >= finalUrl.length) {
+    return stdUrl;
+  }
+  
   return decodeURIComponent(finalUrl);
 }
 
@@ -396,20 +408,13 @@ async function processSubscription(request, url, backend) {
 async function forwardToBackend(request, url, backend, host, subDir, replacements, keys, replacedURIs) {
   try {
     const newUrl = replacedURIs.join('|');
-    const incomingParams = new URL(request.url).searchParams;
-    const originalParams = new URLSearchParams();
-    
-    // Whitelist of psub / subconverter parameters to keep
-    const psubParams = ['target', 'config', 'emoji', 'list', 'udp', 'tfo', 'scv', 'fdn', 'sort', 'dev', 'bd', 'insert', 'exclude', 'append_info', 'expand', 'new_name', 'rename', 'filename', 'path', 'prefix', 'suffix', 'ver'];
-    
-    for (const [key, value] of incomingParams.entries()) {
-      if (psubParams.includes(key)) {
-        originalParams.set(key, value);
-      }
-    }
-    
+    const originalParams = new URLSearchParams(new URL(request.url).search);
     originalParams.set('url', newUrl);
     
+    // Ensure we don't leak uncaptured internal params that might have double-existed
+    const urlKeys = ['target', 'config', 'emoji', 'list', 'udp', 'tfo', 'scv', 'fdn', 'sort', 'dev', 'bd', 'insert', 'exclude', 'append_info', 'expand', 'new_name', 'rename', 'filename', 'path', 'prefix', 'suffix', 'ver', 'xudp'];
+    
+    // No strict cleaning, just standard path reconstruction
     const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
     const backendUrl = `${backendBase}/sub?${originalParams.toString()}`;
     
