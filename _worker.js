@@ -3698,7 +3698,44 @@ var src_default = {
         .split("/")
         .filter((segment) => segment.length > 0);
 
-      const urlParam = url.searchParams.get("url");
+      // Robustly extract 'url' parameter using greedy matching to prevent truncation by internal '&'
+      function getFullUrl(requestUrl) {
+        const u = new URL(requestUrl);
+        const search = u.search;
+        if (!search) return u.searchParams.get('url');
+
+        // psub / subconverter top-level reserved parameters
+        const reserved = ['target=', 'config=', 'emoji=', 'list=', 'udp=', 'tfo=', 'scv=', 'fdn=', 'sort=', 'dev=', 'bd=', 'insert=', 'exclude=', 'append_info=', 'expand=', 'new_name=', 'rename=', 'filename='];
+        
+        let searchStr = search.substring(1);
+        let urlStart = -1;
+        const urlKeys = ['url=', 'sub=']; // Support both url and sub
+        
+        for (const k of urlKeys) {
+          let idx = searchStr.indexOf(k);
+          if (idx !== -1 && (idx === 0 || searchStr[idx - 1] === '&')) {
+            urlStart = idx + k.length;
+            break;
+          }
+        }
+
+        if (urlStart === -1) return u.searchParams.get('url');
+
+        let remaining = searchStr.substring(urlStart);
+        let bestCut = remaining.length;
+
+        for (const r of reserved) {
+          let rIdx = remaining.indexOf('&' + r);
+          if (rIdx !== -1 && rIdx < bestCut) {
+            bestCut = rIdx;
+          }
+        }
+
+        let finalUrl = remaining.substring(0, bestCut);
+        return decodeURIComponent(finalUrl);
+      }
+
+      const urlParam = getFullUrl(request.url);
 
       // 优先检查是否有 url 参数（订阅转换）
       if (urlParam) {
@@ -3800,13 +3837,21 @@ var src_default = {
           }
         }
       } else {
-        const urlParts = urlParam
-          .split("|")
-          .filter((part) => part.trim() !== "");
+        const urlParts = urlParam.split("|").filter((part) => part.trim() !== "");
         if (urlParts.length === 0)
           return new Response("There are no valid links", { status: 400 });
         let response, parsedObj, plaintextData;
         for (const url2 of urlParts) {
+          // If target is present, bypass local processing for remote URLs to avoid 400 error on Vercel (Edge state loss)
+          const target = url.searchParams.get("target");
+          if (
+            target &&
+            (url2.startsWith("https://") || url2.startsWith("http://"))
+          ) {
+            replacedURIs.push(url2);
+            continue;
+          }
+
           const key = generateRandomStr(16);
           if (url2.startsWith("https://") || url2.startsWith("http://")) {
             console.log("[psub] 获取订阅:", url2);
@@ -4156,8 +4201,16 @@ var src_default = {
       console.log("[psub] 成功处理, 有效订阅链接数:", replacedURIs.length);
       const newUrl = replacedURIs.join("|");
 
-      // 保留原始请求的所有参数，只替换 url 参数
-      const originalParams = new URLSearchParams(url.search);
+      // 保留原始请求的已知转换器参数，清洗并防止订阅链接参数泄露到顶层
+      const incomingParams = new URL(request.url).searchParams;
+      const originalParams = new URLSearchParams();
+      const psubParams = ['target', 'config', 'emoji', 'list', 'udp', 'tfo', 'scv', 'fdn', 'sort', 'dev', 'bd', 'insert', 'exclude', 'append_info', 'expand', 'new_name', 'rename', 'filename', 'path', 'prefix', 'suffix', 'ver'];
+
+      for (const [key, value] of incomingParams.entries()) {
+        if (psubParams.includes(key)) {
+          originalParams.set(key, value);
+        }
+      }
       originalParams.set("url", newUrl);
 
       // 构建转发到后端的完整URL（保留所有原始参数：target, config, emoji, scv, fdn等）

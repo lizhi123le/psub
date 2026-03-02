@@ -64,6 +64,43 @@ function utf8ToBase64(str) {
   return btoa(unescape(encodeURIComponent(str)));
 }
 
+// Robustly extract 'url' parameter using greedy matching to prevent truncation by internal '&'
+function getFullUrl(requestUrl) {
+  const url = new URL(requestUrl);
+  const search = url.search;
+  if (!search) return url.searchParams.get('url');
+
+  // psub / subconverter top-level reserved parameters
+  const reserved = ['target=', 'config=', 'emoji=', 'list=', 'udp=', 'tfo=', 'scv=', 'fdn=', 'sort=', 'dev=', 'bd=', 'insert=', 'exclude=', 'append_info=', 'expand=', 'new_name=', 'rename=', 'filename='];
+  
+  let searchStr = search.substring(1);
+  let urlStart = -1;
+  const urlKeys = ['url=', 'sub=']; // Support both url and sub
+  
+  for (const k of urlKeys) {
+    let idx = searchStr.indexOf(k);
+    if (idx !== -1 && (idx === 0 || searchStr[idx - 1] === '&')) {
+      urlStart = idx + k.length;
+      break;
+    }
+  }
+
+  if (urlStart === -1) return url.searchParams.get('url');
+
+  let remaining = searchStr.substring(urlStart);
+  let bestCut = remaining.length;
+
+  for (const r of reserved) {
+    let rIdx = remaining.indexOf('&' + r);
+    if (rIdx !== -1 && rIdx < bestCut) {
+      bestCut = rIdx;
+    }
+  }
+
+  let finalUrl = remaining.substring(0, bestCut);
+  return decodeURIComponent(finalUrl);
+}
+
 // Parse subscription data format
 function parseData(data) {
   if (data.includes("proxies:")) return { format: "yaml", data: data };
@@ -254,7 +291,7 @@ function getHost(request) {
 async function processSubscription(request, url, backend) {
   const host = getHost(request);
   const subDir = 'subscription';
-  const targetUrl = url.searchParams.get('url');
+  const targetUrl = getFullUrl(request.url);
   const target = url.searchParams.get('target');
 
   if (!targetUrl) {
@@ -285,6 +322,12 @@ async function processSubscription(request, url, backend) {
   }
 
   for (const urlPart of urlParts) {
+    // If target is present, bypass local processing for remote URLs to avoid 400 error on Vercel (Edge state loss)
+    if (target && (urlPart.startsWith('https://') || urlPart.startsWith('http://'))) {
+      replacedURIs.push(urlPart);
+      continue;
+    }
+
     const key = generateRandomStr(16);
     let plaintextData = "";
     let responseHeaders = {};
@@ -353,7 +396,18 @@ async function processSubscription(request, url, backend) {
 async function forwardToBackend(request, url, backend, host, subDir, replacements, keys, replacedURIs) {
   try {
     const newUrl = replacedURIs.join('|');
-    const originalParams = new URL(request.url).searchParams;
+    const incomingParams = new URL(request.url).searchParams;
+    const originalParams = new URLSearchParams();
+    
+    // Whitelist of psub / subconverter parameters to keep
+    const psubParams = ['target', 'config', 'emoji', 'list', 'udp', 'tfo', 'scv', 'fdn', 'sort', 'dev', 'bd', 'insert', 'exclude', 'append_info', 'expand', 'new_name', 'rename', 'filename', 'path', 'prefix', 'suffix', 'ver'];
+    
+    for (const [key, value] of incomingParams.entries()) {
+      if (psubParams.includes(key)) {
+        originalParams.set(key, value);
+      }
+    }
+    
     originalParams.set('url', newUrl);
     
     const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
