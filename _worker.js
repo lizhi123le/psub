@@ -3666,17 +3666,14 @@ var src_default = {
       const frontendUrl =
         "https://raw.githubusercontent.com/lizhi123le/psub/refs/heads/main/index.html";
 
-      // 兼容 Cloudflare Workers (R2/KV) 和 Vercel/Node.js
-      // Cloudflare: env.SUB_BUCKET, Vercel: 使用内存缓存
+      // 数据存储配置: 优先使用 Cloudflare R2/KV (env.SUB_BUCKET)，如果没有配置则回退到内存缓存
       let SUB_BUCKET = null;
       let useMemoryCache = false;
-      const memoryCache = new Map(); // Vercel 内存缓存
+      const memoryCache = new Map();
 
       if (env.SUB_BUCKET) {
-        // Cloudflare Workers - 使用 R2/KV
         SUB_BUCKET = env.SUB_BUCKET;
       } else {
-        // Vercel/其他平台 - 使用内存缓存
         useMemoryCache = true;
       }
 
@@ -3714,31 +3711,7 @@ var src_default = {
           });
         }
         const originalHtml = await response.text();
-
-        // 检测是否为 Vercel 部署环境 (使用内存缓存且不是 Cloudflare Workers)
-        const isVercel = useMemoryCache && !env.SUB_BUCKET;
-
-        // 仅在 Vercel 部署时替换域名
-        let modifiedHtml = originalHtml;
-        if (isVercel) {
-          // Replace bulianglin2023.dev with current host - handle multiple formats
-          // Format 1: https://bulianglin2023.dev
-          modifiedHtml = modifiedHtml.replace(
-            /https:\/\/bulianglin2023\.dev/g,
-            host,
-          );
-          // Format 2: bulianglin2023.dev (without protocol)
-          modifiedHtml = modifiedHtml.replace(/bulianglin2023\.dev/g, url.host);
-          // Format 3: URL encoded version
-          modifiedHtml = modifiedHtml.replace(
-            /https%3A%2F%2Fbulianglin2023\.dev/g,
-            encodeURIComponent(host),
-          );
-          // Also replace api.v1.mk backend domain
-          modifiedHtml = modifiedHtml.replace(/https:\/\/api\.v1\.mk/g, host);
-          modifiedHtml = modifiedHtml.replace(/api\.v1\.mk/g, url.host);
-        }
-        return new Response(modifiedHtml, {
+        return new Response(originalHtml, {
           status: 200,
           headers: {
             "Content-Type": "text/html",
