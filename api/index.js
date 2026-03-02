@@ -70,7 +70,7 @@ function getFullUrl(requestUrl) {
   const search = url.search;
   if (!search) return url.searchParams.get('url');
 
-  // psub / subconverter top-level reserved parameters - extended list
+  // psub / subconverter top-level reserved parameters - comprehensive whitelist
   const reserved = [
     'target=', 'config=', 'emoji=', 'list=', 'udp=', 'tfo=', 'scv=', 'fdn=', 
     'sort=', 'dev=', 'bd=', 'insert=', 'exclude=', 'append_info=', 'expand=', 
@@ -96,6 +96,7 @@ function getFullUrl(requestUrl) {
   let bestCut = remaining.length;
 
   for (const r of reserved) {
+    // Only cut if the reserved parameter is preceded by '&'
     let rIdx = remaining.indexOf('&' + r);
     if (rIdx !== -1 && rIdx < bestCut) {
       bestCut = rIdx;
@@ -104,9 +105,9 @@ function getFullUrl(requestUrl) {
 
   let finalUrl = remaining.substring(0, bestCut);
   
-  // If the captured URL looks like it was encoded (contains % or ://), let standard get handle it if it worked better
+  // Deciding between greedy results and standard extraction
   const stdUrl = url.searchParams.get('url');
-  if (stdUrl && stdUrl.includes('://') && stdUrl.length >= finalUrl.length) {
+  if (stdUrl && stdUrl.includes('://') && stdUrl.length > finalUrl.length) {
     return stdUrl;
   }
   
@@ -408,13 +409,25 @@ async function processSubscription(request, url, backend) {
 async function forwardToBackend(request, url, backend, host, subDir, replacements, keys, replacedURIs) {
   try {
     const newUrl = replacedURIs.join('|');
-    const originalParams = new URLSearchParams(new URL(request.url).search);
+    const incomingParams = new URL(request.url).searchParams;
+    const originalParams = new URLSearchParams();
+    
+    // Strict whitelist of psub / subconverter parameters to keep
+    const whitelist = [
+      'target', 'config', 'emoji', 'list', 'udp', 'tfo', 'scv', 'fdn', 
+      'sort', 'dev', 'bd', 'insert', 'exclude', 'append_info', 'expand', 
+      'new_name', 'rename', 'filename', 'path', 'prefix', 'suffix', 'ver', 
+      'xudp', 'doh', 'rule', 'script', 'node', 'group', 'filter'
+    ];
+    
+    for (const [key, value] of incomingParams.entries()) {
+      if (whitelist.includes(key)) {
+        originalParams.set(key, value);
+      }
+    }
+    
     originalParams.set('url', newUrl);
     
-    // Ensure we don't leak uncaptured internal params that might have double-existed
-    const urlKeys = ['target', 'config', 'emoji', 'list', 'udp', 'tfo', 'scv', 'fdn', 'sort', 'dev', 'bd', 'insert', 'exclude', 'append_info', 'expand', 'new_name', 'rename', 'filename', 'path', 'prefix', 'suffix', 'ver', 'xudp'];
-    
-    // No strict cleaning, just standard path reconstruction
     const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
     const backendUrl = `${backendBase}/sub?${originalParams.toString()}`;
     

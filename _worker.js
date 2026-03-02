@@ -3704,7 +3704,7 @@ var src_default = {
         const search = u.search;
         if (!search) return u.searchParams.get('url');
 
-        // psub / subconverter top-level reserved parameters - extended list
+        // psub / subconverter top-level reserved parameters - comprehensive whitelist
         const reserved = [
           'target=', 'config=', 'emoji=', 'list=', 'udp=', 'tfo=', 'scv=', 'fdn=', 
           'sort=', 'dev=', 'bd=', 'insert=', 'exclude=', 'append_info=', 'expand=', 
@@ -3730,6 +3730,7 @@ var src_default = {
         let bestCut = remaining.length;
 
         for (const r of reserved) {
+          // Only cut if the reserved parameter is preceded by '&'
           let rIdx = remaining.indexOf('&' + r);
           if (rIdx !== -1 && rIdx < bestCut) {
             bestCut = rIdx;
@@ -3739,7 +3740,7 @@ var src_default = {
         let finalUrl = remaining.substring(0, bestCut);
         
         const stdUrl = u.searchParams.get('url');
-        if (stdUrl && stdUrl.includes('://') && stdUrl.length >= finalUrl.length) {
+        if (stdUrl && stdUrl.includes('://') && stdUrl.length > finalUrl.length) {
           return stdUrl;
         }
         
@@ -4212,8 +4213,21 @@ var src_default = {
       console.log("[psub] 成功处理, 有效订阅链接数:", replacedURIs.length);
       const newUrl = replacedURIs.join("|");
 
-      // 保留原始请求的所有参数，并更新 url 参数
-      const originalParams = new URLSearchParams(new URL(request.url).search);
+      // 保留原始请求的已知转换器参数，清洗并防止订阅链接参数泄露到顶层
+      const incomingParams = new URL(request.url).searchParams;
+      const originalParams = new URLSearchParams();
+      const whitelist = [
+        'target', 'config', 'emoji', 'list', 'udp', 'tfo', 'scv', 'fdn', 
+        'sort', 'dev', 'bd', 'insert', 'exclude', 'append_info', 'expand', 
+        'new_name', 'rename', 'filename', 'path', 'prefix', 'suffix', 'ver', 
+        'xudp', 'doh', 'rule', 'script', 'node', 'group', 'filter'
+      ];
+
+      for (const [key, value] of incomingParams.entries()) {
+        if (whitelist.includes(key)) {
+          originalParams.set(key, value);
+        }
+      }
       originalParams.set("url", newUrl);
 
       // 构建转发到后端的完整URL（保留所有原始参数：target, config, emoji, scv, fdn等）
