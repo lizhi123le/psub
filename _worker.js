@@ -104,6 +104,31 @@ function parseData(data) {
   return { format: "unknown", data: data };
 }
 
+// --- IPv6 normalization and host extraction helpers ---
+// Normalize server string: remove surrounding brackets (including encoded %5B/%5D) and return bare host
+function normalizeServer(server) {
+  if (!server) return server;
+  try {
+    // decode possible percent-encoding first
+    server = decodeURIComponent(server);
+  } catch (e) {}
+  if (server.startsWith('[') && server.endsWith(']')) return server.slice(1, -1);
+  if (/^%5B/i.test(server) && /%5D$/i.test(server)) {
+    return server.replace(/^%5B/i, '').replace(/%5D$/i, '');
+  }
+  return server;
+}
+
+// Generic host regex with named groups: matches [ipv6], ipv6, ipv4, or hostname
+const HOST_RE = /(?:\[(?<ipv6_br>[\da-fA-F:]+)\]|(?<ipv6>[\da-fA-F:]+)|(?<ipv4>[\d.]+)|(?<host>[\w.-]+))/u;
+
+// Extract bare host from a regex match result (supports named groups)
+function extractHostFromMatch(match) {
+  if (!match) return null;
+  const groups = match.groups || {};
+  return groups.ipv6 || groups.ipv6_br || groups.ipv4 || groups.host || null;
+}
+
 // --- Obfuscation helpers (ss, ssr, vmess, trojan/vless, hysteria, socks) ---
 function replaceInUri(link, replacements, isRecovery) {
   if (link.startsWith("ss://")) return replaceSS(link, replacements, isRecovery);
@@ -123,17 +148,18 @@ function replaceSS(link, replacements, isRecovery) {
   if (tempLink.includes("@")) {
     const match = tempLink.match(/(\S+?)@(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):/);
     if (!match) return link;
-    const [full, base64Data, server] = match;
+    const [full, base64Data, serverRaw] = match;
     try {
       const decoded = urlSafeBase64Decode(base64Data);
       const parts = decoded.split(":");
       if (parts.length < 2) return link;
       const encryption = parts[0];
       const password = parts.slice(1).join(":");
+      const server = normalizeServer(serverRaw);
       replacements[randomDomain] = server;
       replacements[randomPassword] = password;
       const newStr = urlSafeBase64Encode(encryption + ":" + randomPassword);
-      return link.replace(base64Data, newStr).replace(server, randomDomain);
+      return link.replace(base64Data, newStr).replace(serverRaw, randomDomain);
     } catch (e) { return link; }
   }
   return link;
@@ -144,7 +170,8 @@ function replaceVmess(link, replacements, isRecovery) {
   try {
     const decoded = urlSafeBase64Decode(tempLink);
     const jsonData = JSON.parse(decoded);
-    const server = jsonData.add;
+    const serverRaw = jsonData.add;
+    const server = normalizeServer(serverRaw);
     const uuid = jsonData.id;
     const randomDomain = generateRandomStr(10) + ".com";
     const randomUUID = generateRandomUUID();
@@ -159,14 +186,24 @@ function replaceVmess(link, replacements, isRecovery) {
 }
 
 function replaceTrojan(link, replacements, isRecovery) {
-  const match = link.match(/(vless|trojan):\/\/(.*?)@(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):/);
+  const re = /(vless|trojan):\/\/(.*?)@(?:\[(?<ipv6_br>[\da-fA-F:]+)\]|(?<ipv6>[\da-fA-F:]+)|(?<ipv4>[\d.]+)|(?<host>[\w\.-]+)):/u;
+  const match = link.match(re);
   if (!match) return link;
-  const [full, proto, uuid, server] = match;
-  const randomDomain = generateRandomStr(10) + ".com";
-  const randomUUID = generateRandomUUID();
-  replacements[randomDomain] = server;
-  replacements[randomUUID] = uuid;
-  return link.replace(uuid, randomUUID).replace(server, randomDomain);
+  const server = extractHostFromMatch(match);
+  const rawHostMatch = match[0].match(HOST_RE);
+  const rawHost = rawHostMatch ? rawHostMatch[0] : null;
+  const uuid = match[2];
+
+  if (isRecovery) {
+    const original = replacements[server];
+    return original && rawHost ? link.replace(rawHost, original) : link;
+  } else {
+    const randomDomain = generateRandomStr(10) + ".com";
+    const randomUUID = generateRandomUUID();
+    replacements[randomDomain] = server;
+    replacements[randomUUID] = uuid;
+    return link.replace(uuid, randomUUID).replace(rawHost, randomDomain);
+  }
 }
 
 function replaceSSR(link, replacements, isRecovery) {
@@ -175,19 +212,27 @@ function replaceSSR(link, replacements, isRecovery) {
     let decoded = urlSafeBase64Decode(data);
     const match = decoded.match(/([\[\]\da-fA-F:\.]+|[\w\.-]+):(\d+?):(\S+?):(\S+?):(\S+?):(\S+)\//);
     if (!match) return link;
-    const [, server, port, proto, method, obfs, password] = match;
+    const serverRaw = match[1];
+    const server = normalizeServer(serverRaw);
+    const port = match[2];
+    const proto = match[3];
+    const method = match[4];
+    const obfs = match[5];
+    const passwordEncoded = match[6];
 
     if (isRecovery) {
       const originalServer = replacements[server];
-      const originalPass = replacements[urlSafeBase64Decode(password)];
+      const originalPass = replacements[urlSafeBase64Decode(passwordEncoded)];
       if (!originalServer || !originalPass) return link;
-      return "ssr://" + urlSafeBase64Encode(decoded.replace(server, originalServer).replace(password, urlSafeBase64Encode(originalPass)));
+      const recovered = decoded.replace(serverRaw, originalServer).replace(passwordEncoded, urlSafeBase64Encode(originalPass));
+      return "ssr://" + urlSafeBase64Encode(recovered);
     } else {
       const randomDomain = generateRandomStr(12) + ".com";
       const randomPass = generateRandomStr(12);
       replacements[randomDomain] = server;
-      replacements[randomPass] = urlSafeBase64Decode(password);
-      return "ssr://" + urlSafeBase64Encode(decoded.replace(server, randomDomain).replace(password, urlSafeBase64Encode(randomPass)));
+      replacements[randomPass] = urlSafeBase64Decode(passwordEncoded);
+      const replaced = decoded.replace(serverRaw, randomDomain).replace(passwordEncoded, urlSafeBase64Encode(randomPass));
+      return "ssr://" + urlSafeBase64Encode(replaced);
     }
   } catch (e) { return link; }
 }
@@ -207,16 +252,20 @@ function replaceSocks(link, replacements, isRecovery) {
       const serverPort = temp.slice(atIndex + 1);
       const auth = base64ToUtf8Safe(authBase64);
       const [user, pass] = auth.split(":");
-      const serverMatch = serverPort.match(/^(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):(\d+)$/);
+      const serverMatch = serverPort.match(/^((?:\[(?:[\da-fA-F:]+)\]|[\da-fA-F:]+|[\d.]+|[\w\.-]+)):(\d+)$/u);
       if (!serverMatch) return link;
-      const [, server, port] = serverMatch;
+      const serverRaw = serverMatch[1];
+      const server = normalizeServer(serverRaw);
+      const port = serverMatch[2];
       replacements[fakeIP] = server;
       if (pass) replacements[randomPass] = pass;
       return `socks://${utf8ToBase64(user + ":" + randomPass)}@${fakeIP}:${port}${hashPart}`;
     } else {
-      const serverMatch = temp.match(/^(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):(\d+)$/);
+      const serverMatch = temp.match(/^((?:\[(?:[\da-fA-F:]+)\]|[\da-fA-F:]+|[\d.]+|[\w\.-]+)):(\d+)$/u);
       if (!serverMatch) return link;
-      const [, server, port] = serverMatch;
+      const serverRaw = serverMatch[1];
+      const server = normalizeServer(serverRaw);
+      const port = serverMatch[2];
       replacements[fakeIP] = server;
       return `socks://${fakeIP}:${port}${hashPart}`;
     }
@@ -224,37 +273,54 @@ function replaceSocks(link, replacements, isRecovery) {
 }
 
 function replaceHysteria(link, replacements, isRecovery) {
-  const match = link.match(/hysteria:\/\/(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):/);
+  const re = /hysteria:\/\/(?:\[(?<ipv6_br>[\da-fA-F:]+)\]|(?<ipv6>[\da-fA-F:]+)|(?<ipv4>[\d.]+)|(?<host>[\w\.-]+)):/u;
+  const match = link.match(re);
   if (!match) return link;
-  const server = match[1];
+  const server = extractHostFromMatch(match);
+  const rawHostMatch = match[0].match(HOST_RE);
+  const rawHost = rawHostMatch ? rawHostMatch[0] : null;
+
   if (isRecovery) {
     const original = replacements[server];
-    return original ? link.replace(server, original) : link;
+    return original && rawHost ? link.replace(rawHost, original) : link;
   } else {
     const randomDomain = generateRandomStr(12) + ".com";
     replacements[randomDomain] = server;
-    return link.replace(server, randomDomain);
+    return link.replace(rawHost, randomDomain);
   }
 }
 
 function replaceHysteria2(link, replacements, isRecovery) {
-  const match = link.match(/(hysteria2):\/\/(.*)@(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):/);
+  const re = /(hysteria2):\/\/(.*)@(?:\[(?<ipv6_br>[\da-fA-F:]+)\]|(?<ipv6>[\da-fA-F:]+)|(?<ipv4>[\d.]+)|(?<host>[\w\.-]+)):/u;
+  const match = link.match(re);
   if (!match) return link;
-  const [full, proto, uuid, server] = match;
-  const randomDomain = generateRandomStr(10) + ".com";
-  const randomUUID = generateRandomUUID();
-  replacements[randomDomain] = server;
-  replacements[randomUUID] = uuid;
-  return link.replace(uuid, randomUUID).replace(server, randomDomain);
+  const uuid = match[2];
+  const server = extractHostFromMatch(match);
+  const rawHostMatch = match[0].match(HOST_RE);
+  const rawHost = rawHostMatch ? rawHostMatch[0] : null;
+
+  if (isRecovery) {
+    const original = replacements[server];
+    return original && rawHost ? link.replace(rawHost, original) : link;
+  } else {
+    const randomDomain = generateRandomStr(10) + ".com";
+    const randomUUID = generateRandomUUID();
+    replacements[randomDomain] = server;
+    replacements[randomUUID] = uuid;
+    return link.replace(uuid, randomUUID).replace(rawHost, randomDomain);
+  }
 }
 
 function replaceYAMLContent(content, replacements) {
   let result = content;
-  const serverRegex = /server:\s*(\S+)/g;
-  result = result.replace(serverRegex, (match, server) => {
-    if (server.includes(".") || server.includes(":")) {
+  const serverRegex = /server:\s*(?:\[(?<ipv6_br>[\da-fA-F:]+)\]|(?<ipv6>[\da-fA-F:]+)|(?<ipv4>[\d.]+)|(?<host>[\w.-]+))/gu;
+  result = result.replace(serverRegex, (match, ...args) => {
+    const groups = args[args.length - 1] || {};
+    const server = groups.ipv6 || groups.ipv6_br || groups.ipv4 || groups.host;
+    const normalized = normalizeServer(server);
+    if (normalized && (normalized.includes(".") || normalized.includes(":"))) {
        const randomDomain = generateRandomStr(12) + ".com";
-       replacements[randomDomain] = server;
+       replacements[randomDomain] = normalized;
        return `server: ${randomDomain}`;
     }
     return match;
