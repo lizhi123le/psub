@@ -1,9 +1,5 @@
-// Adapted for Vercel Edge / Serverless deployment
-// Notes:
-// - This file keeps the original logic but adapts KV helpers to use an in-memory Map
-//   and optionally a user-provided global SUB_BUCKET-like client if available.
-// - Provide BACKEND via environment variable BACKEND.
-// - The home page handler replaces occurrences of bulianglin2023.dev with the current host.
+// api/index.js
+// Adapted for Vercel Edge / Serverless deployment (fixed kvGet calls and robustness)
 
 const localCache = new Map();
 
@@ -276,13 +272,15 @@ function replaceYAMLContent(content, replacements) {
 
 // KV helpers: use optional global SUB_BUCKET-like client if provided, otherwise fallback to in-memory Map
 async function kvPut(key, value) {
+  if (!key) {
+    console.error('kvPut called with empty key');
+    return;
+  }
   try {
     if (globalThis.SUB_BUCKET && typeof globalThis.SUB_BUCKET.put === 'function') {
       await globalThis.SUB_BUCKET.put(key, value);
     } else {
-      // in-memory fallback
       localCache.set(key, value);
-      // keep a TTL in memory for 60s
       setTimeout(() => localCache.delete(key), 60000);
     }
   } catch (e) {
@@ -291,11 +289,12 @@ async function kvPut(key, value) {
 }
 
 async function kvGet(key) {
+  if (!key) return null;
   if (localCache.has(key)) return localCache.get(key);
   try {
     if (globalThis.SUB_BUCKET && typeof globalThis.SUB_BUCKET.get === 'function') {
       const v = await globalThis.SUB_BUCKET.get(key);
-      if (v !== null) {
+      if (v !== null && v !== undefined) {
         localCache.set(key, v);
         setTimeout(() => localCache.delete(key), 60000);
       }
@@ -545,12 +544,20 @@ export default async function handler(request) {
     const pathSegments = url.pathname.split("/").filter(s => s);
     const key = pathSegments[pathSegments.length - 1];
 
-    const content = await kvGet(null, key);
-    const headersJson = await kvGet(null, key + "_headers");
+    const content = await kvGet(key);
+    if (!content) {
+      console.error('internal: kvGet returned empty for key', key);
+      return new Response("Not Found", { status: 404 });
+    }
 
-    if (!content) return new Response("Not Found", { status: 404 });
+    const headersJson = await kvGet(key + "_headers");
+    let headersObj = { "Content-Type": "text/plain; charset=utf-8" };
+    try {
+      if (headersJson) headersObj = JSON.parse(headersJson);
+    } catch (e) {
+      console.error('internal: failed to parse headers JSON for key', key, e);
+    }
 
-    const headersObj = headersJson ? JSON.parse(headersJson) : { "Content-Type": "text/plain; charset=utf-8" };
     const headers = new Headers(headersObj);
     headers.set("Access-Control-Allow-Origin", "*");
     return new Response(content, { headers });
@@ -558,7 +565,7 @@ export default async function handler(request) {
 
   // Subscription conversion endpoint
   if (url.pathname === '/sub' || url.pathname.startsWith('/sub')) {
-    return await processSubscription(request, url, BACKEND, null);
+    return await processSubscription(request, url, BACKEND);
   }
 
   return new Response('Not Found', { status: 404 });
