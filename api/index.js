@@ -1,17 +1,28 @@
-// api/index.js
-// Adapted for Vercel Edge / Serverless deployment (fixed kvGet calls and robustness)
+// Vercel Edge Function for psub - Compatible with Cloudflare Worker version
+export const config = {
+  runtime: 'edge',
+  regions: ['hkg1', 'sin1', 'sfo1']
+};
 
-const localCache = new Map();
+// Environment - set BACKEND in Vercel dashboard
+const BACKEND = process.env.BACKEND || 'https://api.v1.mk';
+
+// Memory cache for Vercel (since Vercel doesn't support R2/KV like Cloudflare)
+const memoryCache = new Map();
+
+// Cached version string
+let cachedVersion = null;
 
 function generateRandomStr(len) {
   const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
   let result = '';
-  for (let i = 0; i < len; i++) result += chars.charAt(Math.floor(Math.random() * chars.length));
+  for (let i = 0; i < len; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
   return result;
 }
 
 function generateRandomUUID() {
-  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
     const r = (Math.random() * 16) | 0;
     const v = c == "x" ? r : (r & 3) | 8;
@@ -23,75 +34,37 @@ function escapeRegExp(string) {
   return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function utf8ToBase64(str) {
-  const bytes = new TextEncoder().encode(str);
-  let binary = '';
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-function base64ToUtf8Safe(b64) {
-  const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
-  const base64 = padded.replace(/-/g, "+").replace(/_/g, "/");
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return new TextDecoder().decode(bytes);
-}
-
 function urlSafeBase64Encode(input) {
-  return utf8ToBase64(input);
+  return btoa(input).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 function urlSafeBase64Decode(input) {
   try {
-    return base64ToUtf8Safe(input);
+    const padded = input + "=".repeat((4 - (input.length % 4)) % 4);
+    const base64 = padded.replace(/-/g, "+").replace(/_/g, "/");
+    return base64ToUtf8(base64);
   } catch (e) {
-    return input;
-  }
-}
-
-function getFullUrl(requestUrl) {
-  const url = new URL(requestUrl);
-  const search = url.search;
-  if (!search) return url.searchParams.get('url');
-
-  const reserved = [
-    'target=', 'config=', 'emoji=', 'list=', 'udp=', 'tfo=', 'scv=', 'fdn=',
-    'sort=', 'dev=', 'bd=', 'insert=', 'exclude=', 'append_info=', 'expand=',
-    'new_name=', 'rename=', 'filename=', 'path=', 'prefix=', 'suffix=', 'ver=',
-    'xudp=', 'doh=', 'rule=', 'script=', 'node=', 'group=', 'filter='
-  ];
-
-  let searchStr = search.substring(1);
-  let urlStart = -1;
-  const urlKeys = ['url=', 'sub='];
-
-  for (const k of urlKeys) {
-    let idx = searchStr.indexOf(k);
-    if (idx !== -1 && (idx === 0 || searchStr[idx - 1] === '&')) {
-      urlStart = idx + k.length;
-      break;
+    try {
+      return base64ToUtf8(input);
+    } catch (e2) {
+      return input;
     }
   }
-
-  if (urlStart === -1) return url.searchParams.get('url');
-
-  let remaining = searchStr.substring(urlStart);
-  let bestCut = remaining.length;
-
-  for (const r of reserved) {
-    let rIdx = remaining.indexOf('&' + r);
-    if (rIdx !== -1 && rIdx < bestCut) bestCut = rIdx;
-  }
-
-  let finalUrl = remaining.substring(0, bestCut);
-  const stdUrl = url.searchParams.get('url');
-  if (stdUrl && stdUrl.includes('://') && stdUrl.length > finalUrl.length) return stdUrl;
-
-  try { return decodeURIComponent(finalUrl); } catch (e) { return finalUrl; }
 }
 
+function base64ToUtf8(str) {
+  try {
+    return decodeURIComponent(escape(atob(str)));
+  } catch (e) {
+    return atob(str);
+  }
+}
+
+function utf8ToBase64(str) {
+  return btoa(unescape(encodeURIComponent(str)));
+}
+
+// Parse subscription data format
 function parseData(data) {
   if (data.includes("proxies:")) return { format: "yaml", data: data };
   try {
@@ -101,6 +74,7 @@ function parseData(data) {
   return { format: "unknown", data: data };
 }
 
+// Obfuscation Functions
 function replaceInUri(link, replacements, isRecovery) {
   if (link.startsWith("ss://")) return replaceSS(link, replacements, isRecovery);
   if (link.startsWith("ssr://")) return replaceSSR(link, replacements, isRecovery);
@@ -172,7 +146,7 @@ function replaceSSR(link, replacements, isRecovery) {
     const match = decoded.match(/([\[\]\da-fA-F:\.]+|[\w\.-]+):(\d+?):(\S+?):(\S+?):(\S+?):(\S+)\//);
     if (!match) return link;
     const [, server, port, proto, method, obfs, password] = match;
-
+    
     if (isRecovery) {
       const originalServer = replacements[server];
       const originalPass = replacements[urlSafeBase64Decode(password)];
@@ -197,11 +171,11 @@ function replaceSocks(link, replacements, isRecovery) {
     const atIndex = temp.indexOf("@");
     const fakeIP = `10.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}`;
     const randomPass = generateRandomStr(12);
-
+    
     if (atIndex !== -1) {
       const authBase64 = temp.slice(0, atIndex);
       const serverPort = temp.slice(atIndex + 1);
-      const auth = base64ToUtf8Safe(authBase64);
+      const auth = atob(authBase64);
       const [user, pass] = auth.split(":");
       const serverMatch = serverPort.match(/^(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):(\d+)$/);
       if (!serverMatch) return link;
@@ -270,259 +244,224 @@ function replaceYAMLContent(content, replacements) {
   return result;
 }
 
-// KV helpers: use optional global SUB_BUCKET-like client if provided, otherwise fallback to in-memory Map
-async function kvPut(key, value) {
-  if (!key) {
-    console.error('kvPut called with empty key');
-    return;
-  }
-  try {
-    if (globalThis.SUB_BUCKET && typeof globalThis.SUB_BUCKET.put === 'function') {
-      await globalThis.SUB_BUCKET.put(key, value);
-    } else {
-      localCache.set(key, value);
-      setTimeout(() => localCache.delete(key), 60000);
-    }
-  } catch (e) {
-    console.error('KV put error', e);
-  }
-}
-
-async function kvGet(key) {
-  if (!key) return null;
-  if (localCache.has(key)) return localCache.get(key);
-  try {
-    if (globalThis.SUB_BUCKET && typeof globalThis.SUB_BUCKET.get === 'function') {
-      const v = await globalThis.SUB_BUCKET.get(key);
-      if (v !== null && v !== undefined) {
-        localCache.set(key, v);
-        setTimeout(() => localCache.delete(key), 60000);
-      }
-      return v;
-    } else {
-      return null;
-    }
-  } catch (e) {
-    console.error('KV get error', e);
-    return null;
-  }
-}
-
+// Extract host from URL
 function getHost(request) {
-  const u = new URL(request.url);
-  return `${u.protocol}//${u.host}`;
+  const url = new URL(request.url);
+  return `${url.protocol}//${url.host}`;
 }
 
-async function processSubscription(request, urlObj, backend) {
-  const targetUrl = getFullUrl(request.url);
+// Process subscription and replace with local URLs
+async function processSubscription(request, url, backend) {
+  const host = getHost(request);
+  const subDir = 'subscription';
+  const targetUrl = url.searchParams.get('url');
+  const target = url.searchParams.get('target');
+
   if (!targetUrl) {
     const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
-    const backendUrl = `${backendBase}/sub${urlObj.search}`;
-    try {
-      const response = await fetch(backendUrl, {
-        method: 'GET',
-        headers: { 'User-Agent': request.headers.get('user-agent') || 'Mozilla/5.0' }
-      });
-      const text = await response.text();
-      return new Response(text, {
-        status: response.status,
-        headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Access-Control-Allow-Origin': '*' }
-      });
-    } catch (e) {
-      return new Response(`Error: ${e.message}`, { status: 500 });
-    }
+    const backendUrl = `${backendBase}/sub${url.search}`;
+    const response = await fetch(backendUrl, {
+      method: 'GET',
+      headers: {
+        'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0',
+      }
+    });
+    return new Response(await response.text(), {
+      status: response.status,
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Access-Control-Allow-Origin': '*',
+      }
+    });
   }
 
-  const host = getHost(request);
-  const subInternalDir = 'internal';
   const replacements = {};
   const replacedURIs = [];
   const keys = [];
+  const urlParts = targetUrl.split('|').filter(part => part.trim() !== '');
 
-  const urlParts = targetUrl.split('|').filter(p => p.trim() !== '');
+  if (urlParts.length === 0) {
+    return new Response('There are no valid links', { status: 400 });
+  }
 
-  for (const part of urlParts) {
+  for (const urlPart of urlParts) {
+    if (target && (urlPart.startsWith('https://') || urlPart.startsWith('http://'))) {
+      replacedURIs.push(urlPart);
+      continue;
+    }
+
     const key = generateRandomStr(16);
     let plaintextData = "";
     let responseHeaders = {};
 
-    if (part.startsWith('http://') || part.startsWith('https://')) {
+    if (urlPart.startsWith('https://') || urlPart.startsWith('http://')) {
       try {
-        const resp = await fetch(part, {
-          headers: { "User-Agent": request.headers.get("user-agent") || "Mozilla/5.0" }
+        const response = await fetch(urlPart, {
+          method: 'GET',
+          headers: {
+            'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0',
+          }
         });
-        if (resp.ok) {
-          plaintextData = await resp.text();
-          const hdrs = {};
-          for (const [k, v] of resp.headers.entries()) hdrs[k] = v;
-          responseHeaders = hdrs;
-        } else {
-          console.error('remote fetch not ok', part, resp.status);
-          continue;
+        if (response.ok) {
+          plaintextData = await response.text();
+          responseHeaders = Object.fromEntries(response.headers);
         }
       } catch (e) {
-        console.error("Fetch failed:", part, e && e.message ? e.message : e);
+        console.error('Fetch error:', e.message);
         continue;
       }
     } else {
-      plaintextData = part;
+      plaintextData = urlPart;
     }
 
     if (plaintextData) {
       const parsed = parseData(plaintextData);
       let obfuscatedData = plaintextData;
 
-      if (parsed.format === "base64") {
-        const links = parsed.data.split(/\r?\n/).filter(l => l.trim());
+      if (parsed.format === 'base64') {
+        const links = parsed.data.split(/\r?\n/).filter(link => link.trim() !== '');
         const newLinks = [];
         for (const link of links) {
-          const nl = replaceInUri(link, replacements, false);
-          newLinks.push(nl || link);
+          newLinks.push(replaceInUri(link, replacements, false));
         }
-        obfuscatedData = utf8ToBase64(newLinks.join("\r\n"));
-      } else if (parsed.format === "yaml") {
+        obfuscatedData = utf8ToBase64(newLinks.join('\r\n'));
+      } else if (parsed.format === 'yaml') {
         obfuscatedData = replaceYAMLContent(plaintextData, replacements);
       }
 
-      await kvPut(key, obfuscatedData);
-      await kvPut(key + "_headers", JSON.stringify(responseHeaders));
+      memoryCache.set(key, obfuscatedData);
+      memoryCache.set(key + '_headers', JSON.stringify(responseHeaders || { 'Content-Type': 'text/plain;charset=UTF-8' }));
       keys.push(key);
-      replacedURIs.push(`${host}/${subInternalDir}/${key}`);
+      replacedURIs.push(`${host}/${subDir}/${key}`);
     }
   }
 
   if (replacedURIs.length === 0) {
-    return new Response("No valid nodes found", { status: 400 });
+    return new Response('Error: No valid nodes found', { status: 400 });
   }
 
+  // If there's a target parameter, forward to backend for conversion
+  if (target) {
+    return await forwardToBackend(request, url, backend, host, subDir, replacements, keys, replacedURIs);
+  }
+
+  const result = utf8ToBase64(replacedURIs.join('\r\n'));
+  return new Response(result, {
+    headers: {
+      'Content-Type': 'text/plain',
+      'Access-Control-Allow-Origin': '*',
+    }
+  });
+}
+
+// Forward to backend for conversion, then restore original node details
+async function forwardToBackend(request, url, backend, host, subDir, replacements, keys, replacedURIs) {
   try {
     const newUrl = replacedURIs.join('|');
-    const incomingParams = new URL(request.url).searchParams;
-    const originalParams = new URLSearchParams();
-
-    const whitelist = [
-      'target', 'config', 'emoji', 'list', 'udp', 'tfo', 'scv', 'fdn',
-      'sort', 'dev', 'bd', 'insert', 'exclude', 'append_info', 'expand',
-      'new_name', 'rename', 'filename', 'path', 'prefix', 'suffix', 'ver',
-      'xudp', 'doh', 'rule', 'script', 'node', 'group', 'filter'
-    ];
-
-    for (const [k, v] of incomingParams.entries()) {
-      if (whitelist.includes(k)) originalParams.set(k, v);
-    }
+    const originalParams = new URL(request.url).searchParams;
     originalParams.set('url', newUrl);
-
+    
     const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
     const backendUrl = `${backendBase}/sub?${originalParams.toString()}`;
-
+    
     const response = await fetch(backendUrl, {
       method: 'GET',
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      }
     });
 
-    let content = await response.text();
-
-    const backendIndicatesNoNodes = /no nodes were found|no valid nodes found|not found/i.test(content);
-    if (!response.ok || backendIndicatesNoNodes) {
-      const assembled = [];
-      for (const k of keys) {
-        const c = await kvGet(k);
-        if (c) assembled.push(c);
-      }
-      if (assembled.length > 0) {
-        const target = incomingParams.get('target');
-        if (target === 'base64') {
-          content = assembled.join('|');
-        } else {
-          const decodedParts = assembled.map(p => {
-            try {
-              const dec = urlSafeBase64Decode(p);
-              if (dec && (dec.includes('://') || dec.includes('proxies:') || dec.includes('port:'))) return dec;
-            } catch (e) {}
-            return p;
-          });
-          content = decodedParts.join('\r\n');
-        }
-
-        // cleanup
-        for (const k of keys) {
-          try {
-            if (globalThis.SUB_BUCKET && typeof globalThis.SUB_BUCKET.delete === 'function') {
-              await globalThis.SUB_BUCKET.delete(k);
-              await globalThis.SUB_BUCKET.delete(k + "_headers");
-            }
-          } catch (e) {}
-          localCache.delete(k); localCache.delete(k + "_headers");
-        }
-
-        return new Response(content, {
-          status: 200,
-          headers: { "Content-Type": "text/plain; charset=utf-8", "Access-Control-Allow-Origin": "*" }
-        });
-      }
-      return new Response(content, { status: response.status || 500 });
+    if (!response.ok) {
+      return new Response(`Backend error: ${response.status}`, { status: response.status });
     }
 
+    let content = await response.text();
+    
+    // Recovery mapping
     if (Object.keys(replacements).length > 0) {
-      const recoveryRegex = new RegExp(Object.keys(replacements).map(escapeRegExp).join("|"), "g");
-      const target = urlObj.searchParams.get("target");
+      const recoveryRegex = new RegExp(
+        Object.keys(replacements).map(escapeRegExp).join("|"),
+        "g"
+      );
+      
+      const target = url.searchParams.get("target");
+      
       try {
         const decoded = urlSafeBase64Decode(content);
         if (decoded && (decoded.includes("://") || decoded.includes("proxies:") || decoded.includes("port:"))) {
-          const recovered = decoded.replace(recoveryRegex, (m) => replacements[m] || m);
-          content = (target === "base64") ? utf8ToBase64(recovered) : recovered;
+          const recovered = decoded.replace(recoveryRegex, (match) => replacements[match] || match);
+          if (target === "base64") {
+            content = utf8ToBase64(recovered);
+          } else {
+            content = recovered;
+          }
         } else {
-          content = content.replace(recoveryRegex, (m) => replacements[m] || m);
+          content = content.replace(recoveryRegex, (match) => replacements[match] || match);
         }
       } catch (e) {
-        content = content.replace(recoveryRegex, (m) => replacements[m] || m);
+        content = content.replace(recoveryRegex, (match) => replacements[match] || match);
       }
     }
-
-    // cleanup
-    for (const k of keys) {
-      try {
-        if (globalThis.SUB_BUCKET && typeof globalThis.SUB_BUCKET.delete === 'function') {
-          await globalThis.SUB_BUCKET.delete(k);
-          await globalThis.SUB_BUCKET.delete(k + "_headers");
-        }
-      } catch (e) {}
-      localCache.delete(k); localCache.delete(k + "_headers");
+    
+    // Cleanup cache
+    for (const key of keys) {
+      memoryCache.delete(key);
+      memoryCache.delete(key + '_headers');
     }
 
     return new Response(content, {
-      status: response.status,
-      headers: { "Content-Type": "text/plain; charset=utf-8", "Access-Control-Allow-Origin": "*" }
+      status: 200,
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Access-Control-Allow-Origin': '*',
+      }
     });
   } catch (e) {
-    console.error('processSubscription error', e);
-    return new Response(`Error: ${e.message || e}`, { status: 500 });
+    return new Response(`Error: ${e.message}`, { status: 500 });
   }
 }
 
-// Vercel Edge / Serverless handler
 export default async function handler(request) {
-  const BACKEND = (typeof process !== 'undefined' && process.env && process.env.BACKEND) ? process.env.BACKEND : 'https://api.v1.mk';
   const url = new URL(request.url);
   const host = getHost(request);
 
-  // Home page handler with replacements requested by user
-  if (url.pathname === '/' || url.pathname === '/index.html') {
+  // Root - return index.html with domain replacement
+  if (url.pathname === '/' || url.pathname === '') {
     try {
-      const frontendUrl = "https://raw.githubusercontent.com/lizhi123le/psub/refs/heads/main/index.html";
-      const res = await fetch(frontendUrl);
-      if (res.ok) {
-        let html = await res.text();
-        // Replace occurrences of bulianglin2023.dev with current host
+      // In Edge Function, we need to fetch the index.html from the same origin
+      const indexUrl = `${host}/index.html`;
+      const response = await fetch(indexUrl);
+      
+      if (response.ok) {
+        let html = await response.text();
+        
+        // Replace bulianglin2023.dev with current host - handle multiple formats
+        // Format 1: https://bulianglin2023.dev
         html = html.replace(/https:\/\/bulianglin2023\.dev/g, host);
+        // Format 2: bulianglin2023.dev (without protocol)
         html = html.replace(/bulianglin2023\.dev/g, url.host);
+        // Format 3: URL encoded version
         html = html.replace(/https%3A%2F%2Fbulianglin2023\.dev/g, encodeURIComponent(host));
-        return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+        
+        return new Response(html, {
+          headers: { 'Content-Type': 'text/html; charset=utf-8' }
+        });
       }
     } catch (e) {
-      // fall through to default minimal page
+      console.error('Error loading index.html:', e);
     }
-    return new Response(`<!DOCTYPE html><html><head><title>psub</title></head><body><h1>psub</h1><p>Running.</p></body></html>`, {
+    
+    // Fallback to simple page
+    return new Response(`<!DOCTYPE html>
+<html>
+<head><title>psub</title></head>
+<body>
+<h1>psub - Subscription Converter</h1>
+<p>Backend API is running correctly.</p>
+<p>Use: /sub?url=YOUR_SUBSCRIPTION_URL</p>
+<p>Version: /version</p>
+</body>
+</html>`, {
       headers: { 'Content-Type': 'text/html; charset=utf-8' }
     });
   }
@@ -530,37 +469,69 @@ export default async function handler(request) {
   // Version endpoint
   if (url.pathname === '/version') {
     try {
-      const backendBase = BACKEND.replace(/(https?:\/\/[^/]+).*$/, "$1");
-      const response = await fetch(`${backendBase}/version`);
-      const text = await response.text();
-      return new Response(text, { status: response.status, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Access-Control-Allow-Origin': '*' } });
+      const backend = BACKEND.replace(/(https?:\/\/[^/]+).*$/, "$1");
+      const response = await fetch(`${backend}/version`, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0'
+        }
+      });
+
+      if (response.ok) {
+        const text = await response.text();
+        if (text && text.trim().length > 1) {
+          return new Response(text.trim(), {
+            status: 200,
+            headers: {
+              'Content-Type': 'text/plain; charset=utf-8',
+              'Access-Control-Allow-Origin': '*'
+            }
+          });
+        }
+      }
+      
+      // If response not ok, return error with backend info
+      return new Response(`Error: Backend returned ${response.status}`, {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Access-Control-Allow-Origin': '*'
+        }
+      });
     } catch (e) {
-      return new Response(`Error: ${e.message}`, { status: 500 });
+      console.error('Version fetch error:', e);
+      return new Response(`Error: ${e.message}`, {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Access-Control-Allow-Origin': '*'
+        }
+      });
     }
   }
 
-  // Internal temporary subscription endpoint
-  if (url.pathname.includes("/internal/")) {
-    const pathSegments = url.pathname.split("/").filter(s => s);
-    const key = pathSegments[pathSegments.length - 1];
+  // Subscription content endpoint
+  if (url.pathname.startsWith('/subscription/')) {
+    const key = url.pathname.replace('/subscription/', '');
 
-    const content = await kvGet(key);
+    if (!key || key.includes('/') || key.includes('..')) {
+      return new Response('Invalid key', { status: 400 });
+    }
+
+    const content = memoryCache.get(key);
+    const headersStr = memoryCache.get(key + '_headers');
+
     if (!content) {
-      console.error('internal: kvGet returned empty for key', key);
-      return new Response("Not Found", { status: 404 });
+      return new Response('Not Found', { status: 404 });
     }
 
-    const headersJson = await kvGet(key + "_headers");
-    let headersObj = { "Content-Type": "text/plain; charset=utf-8" };
-    try {
-      if (headersJson) headersObj = JSON.parse(headersJson);
-    } catch (e) {
-      console.error('internal: failed to parse headers JSON for key', key, e);
-    }
+    const headers = headersStr ? JSON.parse(headersStr) : { 'Content-Type': 'text/plain;charset=UTF-8' };
 
-    const headers = new Headers(headersObj);
-    headers.set("Access-Control-Allow-Origin", "*");
-    return new Response(content, { headers });
+    return new Response(content, {
+      headers: {
+        ...headers,
+        'Access-Control-Allow-Origin': '*',
+      }
+    });
   }
 
   // Subscription conversion endpoint
@@ -568,5 +539,5 @@ export default async function handler(request) {
     return await processSubscription(request, url, BACKEND);
   }
 
-  return new Response('Not Found', { status: 404 });
+  return new Response('Not found', { status: 404 });
 }
