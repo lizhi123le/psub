@@ -109,7 +109,6 @@ function parseData(data) {
 function normalizeServer(server) {
   if (!server) return server;
   try {
-    // decode possible percent-encoding first
     server = decodeURIComponent(server);
   } catch (e) {}
   if (server.startsWith('[') && server.endsWith(']')) return server.slice(1, -1);
@@ -119,14 +118,13 @@ function normalizeServer(server) {
   return server;
 }
 
-// Generic host regex with named groups: matches [ipv6], ipv6, ipv4, or hostname
-const HOST_RE = /(?:\[(?<ipv6_br>[\da-fA-F:]+)\]|(?<ipv6>[\da-fA-F:]+)|(?<ipv4>[\d.]+)|(?<host>[\w.-]+))/u;
-
-// Extract bare host from a regex match result (supports named groups)
-function extractHostFromMatch(match) {
-  if (!match) return null;
-  const groups = match.groups || {};
-  return groups.ipv6 || groups.ipv6_br || groups.ipv4 || groups.host || null;
+// Helper: return first non-empty string from arguments
+function firstNonEmpty() {
+  for (let i = 0; i < arguments.length; i++) {
+    const v = arguments[i];
+    if (typeof v === 'string' && v.length > 0) return v;
+  }
+  return null;
 }
 
 // --- Obfuscation helpers (ss, ssr, vmess, trojan/vless, hysteria, socks) ---
@@ -146,9 +144,10 @@ function replaceSS(link, replacements, isRecovery) {
   const randomDomain = randomPassword + ".com";
   let tempLink = link.slice(5).split("#")[0];
   if (tempLink.includes("@")) {
-    const match = tempLink.match(/(\S+?)@(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):/);
+    const match = tempLink.match(/(\S+?)@((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\d.]+)|(?:[\w\.-]+)):/);
     if (!match) return link;
-    const [full, base64Data, serverRaw] = match;
+    const base64Data = match[1];
+    const serverRaw = match[2];
     try {
       const decoded = urlSafeBase64Decode(base64Data);
       const parts = decoded.split(":");
@@ -186,17 +185,16 @@ function replaceVmess(link, replacements, isRecovery) {
 }
 
 function replaceTrojan(link, replacements, isRecovery) {
-  const re = /(vless|trojan):\/\/(.*?)@(?:\[(?<ipv6_br>[\da-fA-F:]+)\]|(?<ipv6>[\da-fA-F:]+)|(?<ipv4>[\d.]+)|(?<host>[\w\.-]+)):/u;
+  const re = /(vless|trojan):\/\/(.*?)@((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\d.]+)|(?:[\w\.-]+)):/;
   const match = link.match(re);
   if (!match) return link;
-  const server = extractHostFromMatch(match);
-  const rawHostMatch = match[0].match(HOST_RE);
-  const rawHost = rawHostMatch ? rawHostMatch[0] : null;
   const uuid = match[2];
+  const rawHost = match[3];
+  const server = normalizeServer(rawHost);
 
   if (isRecovery) {
     const original = replacements[server];
-    return original && rawHost ? link.replace(rawHost, original) : link;
+    return original ? link.replace(rawHost, original) : link;
   } else {
     const randomDomain = generateRandomStr(10) + ".com";
     const randomUUID = generateRandomUUID();
@@ -210,7 +208,7 @@ function replaceSSR(link, replacements, isRecovery) {
   try {
     let data = link.slice(6).replace("\r", "").split("#")[0];
     let decoded = urlSafeBase64Decode(data);
-    const match = decoded.match(/([\[\]\da-fA-F:\.]+|[\w\.-]+):(\d+?):(\S+?):(\S+?):(\S+?):(\S+)\//);
+    const match = decoded.match(/((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\w\.-]+)):(\d+?):(\S+?):(\S+?):(\S+?):(\S+)\//);
     if (!match) return link;
     const serverRaw = match[1];
     const server = normalizeServer(serverRaw);
@@ -252,20 +250,20 @@ function replaceSocks(link, replacements, isRecovery) {
       const serverPort = temp.slice(atIndex + 1);
       const auth = base64ToUtf8Safe(authBase64);
       const [user, pass] = auth.split(":");
-      const serverMatch = serverPort.match(/^((?:\[(?:[\da-fA-F:]+)\]|[\da-fA-F:]+|[\d.]+|[\w\.-]+)):(\d+)$/u);
+      const serverMatch = serverPort.match(/^(((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\d.]+)|(?:[\w\.-]+))):(\d+)$/);
       if (!serverMatch) return link;
       const serverRaw = serverMatch[1];
       const server = normalizeServer(serverRaw);
-      const port = serverMatch[2];
+      const port = serverMatch[3];
       replacements[fakeIP] = server;
       if (pass) replacements[randomPass] = pass;
       return `socks://${utf8ToBase64(user + ":" + randomPass)}@${fakeIP}:${port}${hashPart}`;
     } else {
-      const serverMatch = temp.match(/^((?:\[(?:[\da-fA-F:]+)\]|[\da-fA-F:]+|[\d.]+|[\w\.-]+)):(\d+)$/u);
+      const serverMatch = temp.match(/^(((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\d.]+)|(?:[\w\.-]+))):(\d+)$/);
       if (!serverMatch) return link;
       const serverRaw = serverMatch[1];
       const server = normalizeServer(serverRaw);
-      const port = serverMatch[2];
+      const port = serverMatch[3];
       replacements[fakeIP] = server;
       return `socks://${fakeIP}:${port}${hashPart}`;
     }
@@ -273,16 +271,15 @@ function replaceSocks(link, replacements, isRecovery) {
 }
 
 function replaceHysteria(link, replacements, isRecovery) {
-  const re = /hysteria:\/\/(?:\[(?<ipv6_br>[\da-fA-F:]+)\]|(?<ipv6>[\da-fA-F:]+)|(?<ipv4>[\d.]+)|(?<host>[\w\.-]+)):/u;
+  const re = /hysteria:\/\/(((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\d.]+)|(?:[\w\.-]+))):/;
   const match = link.match(re);
   if (!match) return link;
-  const server = extractHostFromMatch(match);
-  const rawHostMatch = match[0].match(HOST_RE);
-  const rawHost = rawHostMatch ? rawHostMatch[0] : null;
+  const rawHost = match[1];
+  const server = normalizeServer(rawHost);
 
   if (isRecovery) {
     const original = replacements[server];
-    return original && rawHost ? link.replace(rawHost, original) : link;
+    return original ? link.replace(rawHost, original) : link;
   } else {
     const randomDomain = generateRandomStr(12) + ".com";
     replacements[randomDomain] = server;
@@ -291,17 +288,16 @@ function replaceHysteria(link, replacements, isRecovery) {
 }
 
 function replaceHysteria2(link, replacements, isRecovery) {
-  const re = /(hysteria2):\/\/(.*)@(?:\[(?<ipv6_br>[\da-fA-F:]+)\]|(?<ipv6>[\da-fA-F:]+)|(?<ipv4>[\d.]+)|(?<host>[\w\.-]+)):/u;
+  const re = /(hysteria2):\/\/(.*)@(((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\d.]+)|(?:[\w\.-]+))):/;
   const match = link.match(re);
   if (!match) return link;
   const uuid = match[2];
-  const server = extractHostFromMatch(match);
-  const rawHostMatch = match[0].match(HOST_RE);
-  const rawHost = rawHostMatch ? rawHostMatch[0] : null;
+  const rawHost = match[3];
+  const server = normalizeServer(rawHost);
 
   if (isRecovery) {
     const original = replacements[server];
-    return original && rawHost ? link.replace(rawHost, original) : link;
+    return original ? link.replace(rawHost, original) : link;
   } else {
     const randomDomain = generateRandomStr(10) + ".com";
     const randomUUID = generateRandomUUID();
@@ -313,11 +309,10 @@ function replaceHysteria2(link, replacements, isRecovery) {
 
 function replaceYAMLContent(content, replacements) {
   let result = content;
-  const serverRegex = /server:\s*(?:\[(?<ipv6_br>[\da-fA-F:]+)\]|(?<ipv6>[\da-fA-F:]+)|(?<ipv4>[\d.]+)|(?<host>[\w.-]+))/gu;
-  result = result.replace(serverRegex, (match, ...args) => {
-    const groups = args[args.length - 1] || {};
-    const server = groups.ipv6 || groups.ipv6_br || groups.ipv4 || groups.host;
-    const normalized = normalizeServer(server);
+  const serverRegex = /server:\s*(((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\d.]+)|(?:[\w\.-]+)))/gu;
+  result = result.replace(serverRegex, (match, p1) => {
+    const serverRaw = p1;
+    const normalized = normalizeServer(serverRaw);
     if (normalized && (normalized.includes(".") || normalized.includes(":"))) {
        const randomDomain = generateRandomStr(12) + ".com";
        replacements[randomDomain] = normalized;
