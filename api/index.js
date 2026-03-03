@@ -1,28 +1,21 @@
-// Vercel Edge Function for psub - Compatible with Cloudflare Worker version
-export const config = {
-  runtime: 'edge',
-  regions: ['hkg1', 'sin1', 'sfo1']
-};
+// Adapted for Vercel Edge / Serverless deployment
+// Notes:
+// - This file keeps the original logic but adapts KV helpers to use an in-memory Map
+//   and optionally a user-provided global SUB_BUCKET-like client if available.
+// - Provide BACKEND via environment variable BACKEND.
+// - The home page handler replaces occurrences of bulianglin2023.dev with the current host.
 
-// Environment - set BACKEND in Vercel dashboard
-const BACKEND = process.env.BACKEND || 'https://api.v1.mk';
-
-// Memory cache for Vercel (since Vercel doesn't support R2/KV like Cloudflare)
-const memoryCache = new Map();
-
-// Cached version string
-let cachedVersion = null;
+const localCache = new Map();
 
 function generateRandomStr(len) {
   const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
   let result = '';
-  for (let i = 0; i < len; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
+  for (let i = 0; i < len; i++) result += chars.charAt(Math.floor(Math.random() * chars.length));
   return result;
 }
 
 function generateRandomUUID() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
     const r = (Math.random() * 16) | 0;
     const v = c == "x" ? r : (r & 3) | 8;
@@ -34,43 +27,39 @@ function escapeRegExp(string) {
   return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function utf8ToBase64(str) {
+  const bytes = new TextEncoder().encode(str);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function base64ToUtf8Safe(b64) {
+  const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+  const base64 = padded.replace(/-/g, "+").replace(/_/g, "/");
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
 function urlSafeBase64Encode(input) {
-  return btoa(input).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return utf8ToBase64(input);
 }
 
 function urlSafeBase64Decode(input) {
   try {
-    const padded = input + "=".repeat((4 - (input.length % 4)) % 4);
-    const base64 = padded.replace(/-/g, "+").replace(/_/g, "/");
-    return base64ToUtf8(base64);
+    return base64ToUtf8Safe(input);
   } catch (e) {
-    try {
-      return base64ToUtf8(input);
-    } catch (e2) {
-      return input;
-    }
+    return input;
   }
 }
 
-function base64ToUtf8(str) {
-  try {
-    return decodeURIComponent(escape(atob(str)));
-  } catch (e) {
-    return atob(str);
-  }
-}
-
-function utf8ToBase64(str) {
-  return btoa(unescape(encodeURIComponent(str)));
-}
-
-// Robustly extract 'url' parameter using greedy matching to prevent truncation by internal '&'
 function getFullUrl(requestUrl) {
   const url = new URL(requestUrl);
   const search = url.search;
   if (!search) return url.searchParams.get('url');
 
-  // psub / subconverter top-level reserved parameters - comprehensive whitelist
   const reserved = [
     'target=', 'config=', 'emoji=', 'list=', 'udp=', 'tfo=', 'scv=', 'fdn=',
     'sort=', 'dev=', 'bd=', 'insert=', 'exclude=', 'append_info=', 'expand=',
@@ -96,29 +85,17 @@ function getFullUrl(requestUrl) {
   let bestCut = remaining.length;
 
   for (const r of reserved) {
-    // Only cut if the reserved parameter is preceded by '&'
     let rIdx = remaining.indexOf('&' + r);
-    if (rIdx !== -1 && rIdx < bestCut) {
-      bestCut = rIdx;
-    }
+    if (rIdx !== -1 && rIdx < bestCut) bestCut = rIdx;
   }
 
   let finalUrl = remaining.substring(0, bestCut);
-
-  // Deciding between greedy results and standard extraction
   const stdUrl = url.searchParams.get('url');
-  if (stdUrl && stdUrl.includes('://') && stdUrl.length > finalUrl.length) {
-    return stdUrl;
-  }
+  if (stdUrl && stdUrl.includes('://') && stdUrl.length > finalUrl.length) return stdUrl;
 
-  try {
-    return decodeURIComponent(finalUrl);
-  } catch (e) {
-    return finalUrl;
-  }
+  try { return decodeURIComponent(finalUrl); } catch (e) { return finalUrl; }
 }
 
-// Parse subscription data format
 function parseData(data) {
   if (data.includes("proxies:")) return { format: "yaml", data: data };
   try {
@@ -128,7 +105,6 @@ function parseData(data) {
   return { format: "unknown", data: data };
 }
 
-// Obfuscation Functions
 function replaceInUri(link, replacements, isRecovery) {
   if (link.startsWith("ss://")) return replaceSS(link, replacements, isRecovery);
   if (link.startsWith("ssr://")) return replaceSSR(link, replacements, isRecovery);
@@ -229,7 +205,7 @@ function replaceSocks(link, replacements, isRecovery) {
     if (atIndex !== -1) {
       const authBase64 = temp.slice(0, atIndex);
       const serverPort = temp.slice(atIndex + 1);
-      const auth = atob(authBase64);
+      const auth = base64ToUtf8Safe(authBase64);
       const [user, pass] = auth.split(":");
       const serverMatch = serverPort.match(/^(\[?[\da-fA-F:]+\]?|[\d\.]+|[\w\.-]+):(\d+)$/);
       if (!serverMatch) return link;
@@ -298,32 +274,60 @@ function replaceYAMLContent(content, replacements) {
   return result;
 }
 
-// Extract host from URL
-function getHost(request) {
-  const url = new URL(request.url);
-  return `${url.protocol}//${url.host}`;
+// KV helpers: use optional global SUB_BUCKET-like client if provided, otherwise fallback to in-memory Map
+async function kvPut(key, value) {
+  try {
+    if (globalThis.SUB_BUCKET && typeof globalThis.SUB_BUCKET.put === 'function') {
+      await globalThis.SUB_BUCKET.put(key, value);
+    } else {
+      // in-memory fallback
+      localCache.set(key, value);
+      // keep a TTL in memory for 60s
+      setTimeout(() => localCache.delete(key), 60000);
+    }
+  } catch (e) {
+    console.error('KV put error', e);
+  }
 }
 
-// Process subscription and forward to backend
-async function processSubscription(request, url, backend) {
-  const targetUrl = getFullUrl(request.url);
+async function kvGet(key) {
+  if (localCache.has(key)) return localCache.get(key);
+  try {
+    if (globalThis.SUB_BUCKET && typeof globalThis.SUB_BUCKET.get === 'function') {
+      const v = await globalThis.SUB_BUCKET.get(key);
+      if (v !== null) {
+        localCache.set(key, v);
+        setTimeout(() => localCache.delete(key), 60000);
+      }
+      return v;
+    } else {
+      return null;
+    }
+  } catch (e) {
+    console.error('KV get error', e);
+    return null;
+  }
+}
 
+function getHost(request) {
+  const u = new URL(request.url);
+  return `${u.protocol}//${u.host}`;
+}
+
+async function processSubscription(request, urlObj, backend) {
+  const targetUrl = getFullUrl(request.url);
   if (!targetUrl) {
     const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
-    const backendUrl = `${backendBase}/sub${url.search}`;
+    const backendUrl = `${backendBase}/sub${urlObj.search}`;
     try {
       const response = await fetch(backendUrl, {
         method: 'GET',
-        headers: {
-          'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0',
-        }
+        headers: { 'User-Agent': request.headers.get('user-agent') || 'Mozilla/5.0' }
       });
-      return new Response(await response.text(), {
+      const text = await response.text();
+      return new Response(text, {
         status: response.status,
-        headers: {
-          'Content-Type': 'text/plain; charset=utf-8',
-          'Access-Control-Allow-Origin': '*',
-        }
+        headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Access-Control-Allow-Origin': '*' }
       });
     } catch (e) {
       return new Response(`Error: ${e.message}`, { status: 500 });
@@ -331,13 +335,12 @@ async function processSubscription(request, url, backend) {
   }
 
   const host = getHost(request);
-  // Use a simple internal path to reduce confusion
   const subInternalDir = 'internal';
   const replacements = {};
   const replacedURIs = [];
   const keys = [];
 
-  const urlParts = targetUrl.split('|').filter(part => part.trim() !== '');
+  const urlParts = targetUrl.split('|').filter(p => p.trim() !== '');
 
   for (const part of urlParts) {
     const key = generateRandomStr(16);
@@ -346,19 +349,16 @@ async function processSubscription(request, url, backend) {
 
     if (part.startsWith('http://') || part.startsWith('https://')) {
       try {
-        const response = await fetch(part, {
-          headers: {
-            "User-Agent": request.headers.get("User-Agent") || "Mozilla/5.0",
-          }
+        const resp = await fetch(part, {
+          headers: { "User-Agent": request.headers.get("user-agent") || "Mozilla/5.0" }
         });
-        if (response.ok) {
-          plaintextData = await response.text();
-          // Convert Headers to plain object safely
+        if (resp.ok) {
+          plaintextData = await resp.text();
           const hdrs = {};
-          for (const [k, v] of response.headers.entries()) hdrs[k] = v;
+          for (const [k, v] of resp.headers.entries()) hdrs[k] = v;
           responseHeaders = hdrs;
         } else {
-          console.error("Remote fetch not ok:", part, response.status);
+          console.error('remote fetch not ok', part, resp.status);
           continue;
         }
       } catch (e) {
@@ -385,9 +385,8 @@ async function processSubscription(request, url, backend) {
         obfuscatedData = replaceYAMLContent(plaintextData, replacements);
       }
 
-      // store obfuscated content in memory cache
-      memoryCache.set(key, obfuscatedData);
-      memoryCache.set(key + "_headers", JSON.stringify(responseHeaders));
+      await kvPut(key, obfuscatedData);
+      await kvPut(key + "_headers", JSON.stringify(responseHeaders));
       keys.push(key);
       replacedURIs.push(`${host}/${subInternalDir}/${key}`);
     }
@@ -402,7 +401,6 @@ async function processSubscription(request, url, backend) {
     const incomingParams = new URL(request.url).searchParams;
     const originalParams = new URLSearchParams();
 
-    // Strict whitelist of psub / subconverter parameters
     const whitelist = [
       'target', 'config', 'emoji', 'list', 'udp', 'tfo', 'scv', 'fdn',
       'sort', 'dev', 'bd', 'insert', 'exclude', 'append_info', 'expand',
@@ -410,10 +408,8 @@ async function processSubscription(request, url, backend) {
       'xudp', 'doh', 'rule', 'script', 'node', 'group', 'filter'
     ];
 
-    for (const [key, value] of incomingParams.entries()) {
-      if (whitelist.includes(key)) {
-        originalParams.set(key, value);
-      }
+    for (const [k, v] of incomingParams.entries()) {
+      if (whitelist.includes(k)) originalParams.set(k, v);
     }
     originalParams.set('url', newUrl);
 
@@ -422,134 +418,111 @@ async function processSubscription(request, url, backend) {
 
     const response = await fetch(backendUrl, {
       method: 'GET',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      }
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
     });
 
     let content = await response.text();
 
-    // If backend indicates no nodes or returns an error that likely stems from inability to fetch internal URLs,
-    // attempt to assemble and return the obfuscated content directly from our memoryCache as a fallback.
     const backendIndicatesNoNodes = /no nodes were found|no valid nodes found|not found/i.test(content);
     if (!response.ok || backendIndicatesNoNodes) {
-      // Try to assemble content directly from cache
-      try {
-        const assembledParts = [];
-        for (const k of keys) {
-          const c = memoryCache.get(k);
-          if (c) assembledParts.push(c);
-        }
-        if (assembledParts.length > 0) {
-          // If target requested base64, keep base64; otherwise decode base64 parts if they are base64
-          const target = incomingParams.get('target');
-          // Heuristic: if backend wanted base64, return base64; else return decoded/plain
-          if (target === 'base64') {
-            content = assembledParts.join('|');
-          } else {
-            // try to decode base64 parts where possible
-            const decodedParts = assembledParts.map(p => {
-              // if looks like base64 (contains newlines or '://' after decode), attempt decode
-              try {
-                const dec = urlSafeBase64Decode(p);
-                if (dec && (dec.includes('://') || dec.includes('proxies:') || dec.includes('port:'))) return dec;
-              } catch (e) {}
-              return p;
-            });
-            content = decodedParts.join('\r\n');
-          }
-          // Return assembled content directly
-          const responseHeaders = new Headers();
-          responseHeaders.set("Content-Type", "text/plain; charset=utf-8");
-          responseHeaders.set("Access-Control-Allow-Origin", "*");
-
-          // Clean up cache after returning
-          for (const k of keys) {
-            memoryCache.delete(k);
-            memoryCache.delete(k + "_headers");
-          }
-
-          return new Response(content, {
-            status: 200,
-            headers: responseHeaders
-          });
-        }
-      } catch (e) {
-        console.error("Fallback assembly failed:", e && e.message ? e.message : e);
+      const assembled = [];
+      for (const k of keys) {
+        const c = await kvGet(k);
+        if (c) assembled.push(c);
       }
-      // If fallback failed, return backend's original response (error)
+      if (assembled.length > 0) {
+        const target = incomingParams.get('target');
+        if (target === 'base64') {
+          content = assembled.join('|');
+        } else {
+          const decodedParts = assembled.map(p => {
+            try {
+              const dec = urlSafeBase64Decode(p);
+              if (dec && (dec.includes('://') || dec.includes('proxies:') || dec.includes('port:'))) return dec;
+            } catch (e) {}
+            return p;
+          });
+          content = decodedParts.join('\r\n');
+        }
+
+        // cleanup
+        for (const k of keys) {
+          try {
+            if (globalThis.SUB_BUCKET && typeof globalThis.SUB_BUCKET.delete === 'function') {
+              await globalThis.SUB_BUCKET.delete(k);
+              await globalThis.SUB_BUCKET.delete(k + "_headers");
+            }
+          } catch (e) {}
+          localCache.delete(k); localCache.delete(k + "_headers");
+        }
+
+        return new Response(content, {
+          status: 200,
+          headers: { "Content-Type": "text/plain; charset=utf-8", "Access-Control-Allow-Origin": "*" }
+        });
+      }
       return new Response(content, { status: response.status || 500 });
     }
 
-    // --- Recovery Phase ---
     if (Object.keys(replacements).length > 0) {
-      const recoveryRegex = new RegExp(
-        Object.keys(replacements).map(escapeRegExp).join("|"),
-        "g"
-      );
-
-      const target = url.searchParams.get("target");
-
+      const recoveryRegex = new RegExp(Object.keys(replacements).map(escapeRegExp).join("|"), "g");
+      const target = urlObj.searchParams.get("target");
       try {
-        // 先尝试 Base64 解码
         const decoded = urlSafeBase64Decode(content);
-        // 如果解码成功且包含特征字符 (或者原本就是 base64 响应)
         if (decoded && (decoded.includes("://") || decoded.includes("proxies:") || decoded.includes("port:"))) {
-           const recovered = decoded.replace(recoveryRegex, (match) => replacements[match] || match);
-           // 只有当明确要求 target=base64 时才重编码，否则返回明文
-           if (target === "base64") {
-             content = utf8ToBase64(recovered);
-           } else {
-             content = recovered;
-           }
+          const recovered = decoded.replace(recoveryRegex, (m) => replacements[m] || m);
+          content = (target === "base64") ? utf8ToBase64(recovered) : recovered;
         } else {
-          // 如果不是 base64，直接替换
-          content = content.replace(recoveryRegex, (match) => replacements[match] || match);
+          content = content.replace(recoveryRegex, (m) => replacements[m] || m);
         }
       } catch (e) {
-        // 解码失败则作为明文替换
-        content = content.replace(recoveryRegex, (match) => replacements[match] || match);
+        content = content.replace(recoveryRegex, (m) => replacements[m] || m);
       }
     }
 
-    // Clean up cache
+    // cleanup
     for (const k of keys) {
-      memoryCache.delete(k);
-      memoryCache.delete(k + "_headers");
+      try {
+        if (globalThis.SUB_BUCKET && typeof globalThis.SUB_BUCKET.delete === 'function') {
+          await globalThis.SUB_BUCKET.delete(k);
+          await globalThis.SUB_BUCKET.delete(k + "_headers");
+        }
+      } catch (e) {}
+      localCache.delete(k); localCache.delete(k + "_headers");
     }
-
-    const responseHeaders = new Headers();
-    responseHeaders.set("Content-Type", "text/plain; charset=utf-8");
-    responseHeaders.set("Access-Control-Allow-Origin", "*");
 
     return new Response(content, {
       status: response.status,
-      headers: responseHeaders
+      headers: { "Content-Type": "text/plain; charset=utf-8", "Access-Control-Allow-Origin": "*" }
     });
   } catch (e) {
-    console.error("processSubscription error:", e && e.message ? e.message : e);
-    return new Response(`Error: ${e.message}`, { status: 500 });
+    console.error('processSubscription error', e);
+    return new Response(`Error: ${e.message || e}`, { status: 500 });
   }
 }
 
+// Vercel Edge / Serverless handler
 export default async function handler(request) {
+  const BACKEND = (typeof process !== 'undefined' && process.env && process.env.BACKEND) ? process.env.BACKEND : 'https://api.v1.mk';
   const url = new URL(request.url);
   const host = getHost(request);
 
-  // Home page handler
+  // Home page handler with replacements requested by user
   if (url.pathname === '/' || url.pathname === '/index.html') {
     try {
       const frontendUrl = "https://raw.githubusercontent.com/lizhi123le/psub/refs/heads/main/index.html";
       const res = await fetch(frontendUrl);
       if (res.ok) {
         let html = await res.text();
+        // Replace occurrences of bulianglin2023.dev with current host
         html = html.replace(/https:\/\/bulianglin2023\.dev/g, host);
         html = html.replace(/bulianglin2023\.dev/g, url.host);
         html = html.replace(/https%3A%2F%2Fbulianglin2023\.dev/g, encodeURIComponent(host));
         return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
       }
-    } catch (e) {}
-
+    } catch (e) {
+      // fall through to default minimal page
+    }
     return new Response(`<!DOCTYPE html><html><head><title>psub</title></head><body><h1>psub</h1><p>Running.</p></body></html>`, {
       headers: { 'Content-Type': 'text/html; charset=utf-8' }
     });
@@ -558,32 +531,34 @@ export default async function handler(request) {
   // Version endpoint
   if (url.pathname === '/version') {
     try {
-      const backend = BACKEND.replace(/(https?:\/\/[^/]+).*$/, "$1");
-      const response = await fetch(`${backend}/version`);
-      return new Response(await response.text(), { status: response.status, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Access-Control-Allow-Origin': '*' } });
+      const backendBase = BACKEND.replace(/(https?:\/\/[^/]+).*$/, "$1");
+      const response = await fetch(`${backendBase}/version`);
+      const text = await response.text();
+      return new Response(text, { status: response.status, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Access-Control-Allow-Origin': '*' } });
     } catch (e) {
       return new Response(`Error: ${e.message}`, { status: 500 });
     }
   }
 
-  // 内部临时订阅端点
+  // Internal temporary subscription endpoint
   if (url.pathname.includes("/internal/")) {
     const pathSegments = url.pathname.split("/").filter(s => s);
     const key = pathSegments[pathSegments.length - 1];
 
-    let content = memoryCache.get(key);
-    let headersJson = memoryCache.get(key + "_headers");
+    const content = await kvGet(null, key);
+    const headersJson = await kvGet(null, key + "_headers");
 
     if (!content) return new Response("Not Found", { status: 404 });
 
-    const headers = new Headers(headersJson ? JSON.parse(headersJson) : { "Content-Type": "text/plain; charset=utf-8", "Access-Control-Allow-Origin": "*" });
+    const headersObj = headersJson ? JSON.parse(headersJson) : { "Content-Type": "text/plain; charset=utf-8" };
+    const headers = new Headers(headersObj);
     headers.set("Access-Control-Allow-Origin", "*");
     return new Response(content, { headers });
   }
 
   // Subscription conversion endpoint
   if (url.pathname === '/sub' || url.pathname.startsWith('/sub')) {
-    return await processSubscription(request, url, BACKEND);
+    return await processSubscription(request, url, BACKEND, null);
   }
 
   return new Response('Not Found', { status: 404 });
