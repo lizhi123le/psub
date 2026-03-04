@@ -340,7 +340,7 @@ async function kvPut(env, key, value) {
   try {
     await env.SUB_BUCKET.put(key, value);
     localCache.set(key, value);
-    setTimeout(() => localCache.delete(key), 60000);
+setTimeout(() => localCache.delete(key), 720000);
   } catch (e) {
     console.error('KV put error', e);
   }
@@ -352,7 +352,7 @@ async function kvGet(env, key) {
     const v = await env.SUB_BUCKET.get(key);
     if (v !== null) {
       localCache.set(key, v);
-      setTimeout(() => localCache.delete(key), 60000);
+setTimeout(() => localCache.delete(key), 720000);
     }
     return v;
   } catch (e) {
