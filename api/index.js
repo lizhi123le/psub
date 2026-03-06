@@ -1,5 +1,3 @@
-// Vercel Edge Function for psub - Improved version based on Cloudflare Worker
-
 export const config = {
   runtime: 'edge',
   regions: ['hkg1', 'sin1', 'sfo1']
@@ -14,18 +12,18 @@ const localCache = new Map();
 // Memory cache for Vercel subscription content storage
 const memoryCache = new Map();
 
-// UTF-8 <-> Base64 helpers using TextEncoder/TextDecoder
+// UTF-8 <-> Base64 helpers (standard base64, compatible with base64ToUtf8Safe)
 function utf8ToBase64(str) {
-  const bytes = new TextEncoder().encode(str);
-  let binary = '';
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
+  try {
+    // standard base64 encoding
+    return btoa(unescape(encodeURIComponent(str)));
+  } catch (e) {
+    // fallback for environments where unescape/encodeURIComponent behave differently
+    const bytes = new TextEncoder().encode(str);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
   }
-  // 这里用原始字节数计算 padding，不是字符串长度
-  return btoa(binary)
-      .replace(/\+/g, '-')
-      .replace(/\//g, '_')
-      .concat(`=${bytes.length % 8 === 0 ? '' : '='.repeat(4 - bytes.length % 8)} `);
 }
 
 function base64ToUtf8Safe(b64) {
@@ -61,6 +59,7 @@ function escapeRegExp(string) {
 
 // Robust parsing of subscription data format
 function parseData(data) {
+  if (!data) return { format: "unknown", data: data };
   if (data.includes("proxies:")) return { format: "yaml", data: data };
   try {
     const decoded = base64ToUtf8Safe(data.trim());
@@ -155,6 +154,7 @@ function getHost(request) {
 
 // Replace function for different protocols with obfuscation helpers
 function replaceInUri(link, replacements, isRecovery) {
+  if (!link) return link;
   if (link.startsWith("ss://")) return _replaceSS(link, replacements, isRecovery);
   if (link.startsWith("ssr://")) return _replaceSSR(link, replacements, isRecovery);
   if (link.startsWith("vmess://")) return replaceVmess(link, replacements, isRecovery);
@@ -183,8 +183,8 @@ function _replaceSS(link, replacements, isRecovery) {
       const encryption = parts[0];
       const password = parts.slice(1).join(":");
       const server = normalizeServer(serverRaw);
-      replacements[randomDomain] = server;
-      replacements[randomPassword] = password;
+      if (replacements && server) replacements[randomDomain] = server;
+      if (replacements && password) replacements[randomPassword] = password;
       const newStr = utf8ToBase64(encryption + ":" + randomPassword);
       return link.replace(base64Data, newStr).replace(serverRaw, randomDomain);
     } catch (e) { return link; }
@@ -202,8 +202,8 @@ function replaceVmess(link, replacements, isRecovery) {
     const uuid = jsonData.id;
     const randomDomain = generateRandomStr(10) + ".com";
     const randomUUID = generateRandomUUID();
-    replacements[randomDomain] = server;
-    replacements[randomUUID] = uuid;
+    if (replacements && server) replacements[randomDomain] = server;
+    if (replacements && uuid) replacements[randomUUID] = uuid;
     jsonData.add = randomDomain;
     jsonData.id = randomUUID;
     return "vmess://" + utf8ToBase64(JSON.stringify(jsonData));
@@ -221,13 +221,15 @@ function replaceTrojan(link, replacements, isRecovery) {
   const server = normalizeServer(rawHost);
 
   if (isRecovery) {
-    const original = replacements[server];
+    const original = replacements && (replacements[server] || replacements[rawHost]);
     return original ? link.replace(rawHost, original) : link;
   } else {
     const randomDomain = generateRandomStr(10) + ".com";
     const randomUUID = generateRandomUUID();
-    replacements[randomDomain] = server;
-    replacements[randomUUID] = uuid;
+    if (replacements) {
+      replacements[randomDomain] = server;
+      replacements[randomUUID] = uuid;
+    }
     return link.replace(uuid, randomUUID).replace(rawHost, randomDomain);
   }
 }
@@ -247,18 +249,20 @@ function _replaceSSR(link, replacements, isRecovery) {
     const passwordEncoded = match[6];
 
     if (isRecovery) {
-      const originalServer = replacements[serverRaw];
-      const originalPass = base64ToUtf8Safe(passwordEncoded);
+      const originalServer = replacements && (replacements[serverRaw] || replacements[server]);
+      const originalPass = passwordEncoded ? base64ToUtf8Safe(passwordEncoded) : null;
       if (!originalServer || !originalPass) return link;
       const recovered = decoded.replace(serverRaw, originalServer).replace(passwordEncoded, utf8ToBase64(originalPass));
       return "ssr://" + utf8ToBase64(recovered);
     } else {
       const randomDomain = generateRandomStr(12) + ".com";
       const randomPass = generateRandomStr(12);
-      replacements[randomDomain] = serverRaw;
-      replacements[randomPass] = passwordEncoded;
+      if (replacements) {
+        replacements[randomDomain] = serverRaw;
+        replacements[randomPass] = passwordEncoded;
+      }
       const replaced = decoded.replace(serverRaw, randomDomain).replace(passwordEncoded, utf8ToBase64(randomPass));
-      return "ssr://" + uuidToBase64(replaced);
+      return "ssr://" + utf8ToBase64(replaced);
     }
   } catch (e) { return link; }
 }
@@ -280,16 +284,16 @@ function replaceSocks(link, replacements, isRecovery) {
       const serverMatch = serverPort.match(/^(((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\d.]+)|(?:[\w\.-]+))):(\d+)$/);
       if (!serverMatch) return link;
       const serverRaw = serverMatch[1];
-      replacements[fakeIP] = serverRaw;
+      if (replacements) replacements[fakeIP] = serverRaw;
       const randomPass = generateRandomStr(12);
       const port = serverMatch[3];
-      if (pass) replacements[randomPass] = pass;
+      if (pass && replacements) replacements[randomPass] = pass;
       return `socks://${utf8ToBase64(user + ":" + randomPass)}@${fakeIP}:${port}${hashPart}`;
     } else {
       const serverMatch = temp.match(/^(((?:\[[\da-fA-F:]+\])|(?:[\d\-\w\.]+))):(\d+)$/);
       if (!serverMatch) return link;
       const serverRaw = serverMatch[1];
-      replacements[fakeIP] = serverRaw;
+      if (replacements) replacements[fakeIP] = serverRaw;
       return `socks://${fakeIP}:${serverMatch[3]}${hashPart}`;
     }
   } catch (e) { return link; }
@@ -303,11 +307,11 @@ function replaceHysteria(link, replacements, isRecovery) {
   const server = normalizeServer(rawHost);
 
   if (isRecovery) {
-    const original = replacements[server] || replacements[rawHost];
+    const original = replacements && (replacements[server] || replacements[rawHost]);
     return original ? link.replace(rawHost, original) : link;
   } else {
     const randomDomain = generateRandomStr(12) + ".com";
-    replacements[randomDomain] = rawHost;
+    if (replacements) replacements[randomDomain] = rawHost;
     return link.replace(rawHost, randomDomain);
   }
 }
@@ -321,13 +325,15 @@ function replaceHysteria2(link, replacements, isRecovery) {
   const server = normalizeServer(rawHost);
 
   if (isRecovery) {
-    const original = replacements[server] || replacements[rawHost];
+    const original = replacements && (replacements[server] || replacements[rawHost]);
     return original ? link.replace(rawHost, original) : link;
   } else {
     const randomDomain = generateRandomStr(10) + ".com";
     const randomUUID = generateRandomUUID();
-    replacements[randomDomain] = rawHost;
-    replacements[randomUUID] = uuid;
+    if (replacements) {
+      replacements[randomDomain] = rawHost;
+      replacements[randomUUID] = uuid;
+    }
     return link.replace(uuid, randomUUID).replace(rawHost, randomDomain);
   }
 }
@@ -340,7 +346,7 @@ function replaceYAMLContent(content, replacements) {
     const normalized = normalizeServer(serverRaw);
     if (normalized && (normalized.includes(".") || normalized.includes(":"))) {
       const randomDomain = generateRandomStr(12) + ".com";
-      replacements[randomDomain] = normalized;
+      if (replacements) replacements[randomDomain] = normalized;
       return `server: ${randomDomain}`;
     }
     return match;
@@ -348,13 +354,13 @@ function replaceYAMLContent(content, replacements) {
   const uuidRegex = /uuid:\s*(\S+)/g;
   result = result.replace(uuidRegex, (match, uuid) => {
     const randomUUID = generateRandomUUID();
-    replacements[randomUUID] = uuid;
+    if (replacements) replacements[randomUUID] = uuid;
     return `uuid: ${randomUUID}`;
   });
   const passRegex = /password:\s*(\S+)/g;
   result = result.replace(passRegex, (match, pass) => {
     const randomPass = generateRandomStr(12);
-    replacements[randomPass] = pass;
+    if (replacements) replacements[randomPass] = pass;
     return `password: ${randomPass}`;
   });
   return result;
@@ -371,6 +377,9 @@ async function processSubscription(request, url, backend) {
     return new Response('Missing url parameter', { status: 400 });
   }
 
+  // Make replacedURIs available to all branches
+  const replacedURIs = [];
+
   // If there's a target parameter (like 'clash'), forward to backend for conversion first
   if (target) {
     const replacements = {};
@@ -383,7 +392,7 @@ async function processSubscription(request, url, backend) {
           'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
           'Accept': 'text/plain,*/*'
         },
-        signal: AbortSignal.timeout(30000)
+        signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(30000) : undefined
       });
 
       if (!response.ok) {
@@ -400,7 +409,21 @@ async function processSubscription(request, url, backend) {
       let obfuscatedData = content;
 
       if (parsed.format === 'yaml') {
-        // First do full replacement, then save to internal storage
+        // If needed, obfuscate YAML content before saving
+        obfuscatedData = replaceYAMLContent(content, replacements);
+      } else if (parsed.format === 'base64') {
+        // If backend returned base64-encoded list, try to obfuscate each link
+        try {
+          const lines = parsed.data.split(/\r?\n/).filter(l => l.trim());
+          const out = [];
+          for (const line of lines) {
+            const nl = replaceInUri(line, replacements, false);
+            out.push(nl || line);
+          }
+          obfuscatedData = out.join('\r\n');
+        } catch (e) {
+          obfuscatedData = content;
+        }
       }
 
       // Save to memory cache for retrieval
@@ -419,12 +442,11 @@ async function processSubscription(request, url, backend) {
         }
       });
     } catch (e) {
-      return new Response(`Error forwarding to backend: ${e.message}`, { status: 500 });
+      return new Response(`Error forwarding to backend: ${e && e.message ? e.message : String(e)}`, { status: 500 });
     }
   }
 
   // Parse the subscription URL
-  const replacedURIs = [];
   const urlParts = targetUrl.split('|').filter(p => p.trim() !== '');
 
   if (urlParts.length === 0) {
@@ -436,15 +458,22 @@ async function processSubscription(request, url, backend) {
 
     if (rawPart.startsWith('http://') || rawPart.startsWith('https://')) {
       try {
-        const controller = new AbortController();
-        AbortSignal.timeout(30000);
+        // create a controller and set a timeout if AbortSignal.timeout is not available
+        let signal;
+        if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
+          signal = AbortSignal.timeout(30000);
+        } else {
+          const controller = new AbortController();
+          const t = setTimeout(() => controller.abort(), 30000);
+          signal = controller.signal;
+        }
 
         const response = await fetch(rawPart, {
           method: 'GET',
           headers: {
             'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
           },
-          signal: controller.signal
+          signal
         });
 
         if (!response.ok) continue;
@@ -458,14 +487,14 @@ async function processSubscription(request, url, backend) {
 
         if (parsed.format === 'base64') {
           const links = parsed.data.split(/\r?\n/).filter(l => l.trim());
+          // per-file replacements map
+          const replacements = {};
+          const out = [];
           for (const link of links) {
-            const nl = replaceInUri(link, replacments, false);
-            if (nl && nl !== link) {
-              obfuscatedData = utf8ToBase64(nl);
-            } else {
-              obfuscatedData = nl || link;
-            }
+            const nl = replaceInUri(link, replacements, false);
+            out.push(nl || link);
           }
+          obfuscatedData = out.join('\r\n');
         } else if (parsed.format === 'yaml') {
           obfuscatedData = replaceYAMLContent(content, {});
         }
@@ -473,7 +502,7 @@ async function processSubscription(request, url, backend) {
         memoryCache.set(key, obfuscatedData);
         replacedURIs.push(`${host}/${subDir}/${key}`);
       } catch (e) {
-        console.error('Fetch error:', e.message);
+        console.error('Fetch error:', e && e.message ? e.message : String(e));
         continue;
       }
     } else if (/^(ssr?|vmess1?|trojan|vless|hysteria|hysteria2|tg):\/\//.test(rawPart) || rawPart.startsWith('socks://')) {
