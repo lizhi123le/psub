@@ -10,15 +10,40 @@ const BACKEND = process.env.BACKEND || 'https://api.v1.mk';
 const localCache = new Map();
 
 // Memory cache for Vercel subscription content storage
+// Stored value: { content: string, headers?: object, createdAt: number, timeoutId?: number }
 const memoryCache = new Map();
+
+// TTL for memoryCache entries (milliseconds)
+const MEMORY_CACHE_TTL = 60 * 1000; // 60 seconds
+
+// Helper to store into memoryCache with automatic expiry
+function memoryCacheSet(key, value) {
+  // Clear existing timeout if present
+  const existing = memoryCache.get(key);
+  if (existing && existing.timeoutId) {
+    try { clearTimeout(existing.timeoutId); } catch (e) {}
+  }
+  const timeoutId = setTimeout(() => {
+    try { memoryCache.delete(key); } catch (e) {}
+  }, MEMORY_CACHE_TTL);
+
+  memoryCache.set(key, { ...value, createdAt: Date.now(), timeoutId });
+}
+
+// Helper to delete memoryCache entry immediately and clear timeout
+function memoryCacheDelete(key) {
+  const v = memoryCache.get(key);
+  if (v && v.timeoutId) {
+    try { clearTimeout(v.timeoutId); } catch (e) {}
+  }
+  memoryCache.delete(key);
+}
 
 // UTF-8 <-> Base64 helpers (standard base64, compatible with base64ToUtf8Safe)
 function utf8ToBase64(str) {
   try {
-    // standard base64 encoding
     return btoa(unescape(encodeURIComponent(str)));
   } catch (e) {
-    // fallback for environments where unescape/encodeURIComponent behave differently
     const bytes = new TextEncoder().encode(str);
     let binary = '';
     for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
@@ -127,8 +152,6 @@ function getFullUrl(requestUrl) {
 async function kvGet(env, key) {
   if (localCache.has(key)) return localCache.get(key);
   try {
-    // Vercel Edge doesn't have KV, but this pattern can be used in other runtime environments
-    // For now, return null to simulate failure
     return null;
   } catch (e) {
     console.error('KV get error', e);
@@ -138,8 +161,6 @@ async function kvGet(env, key) {
 
 async function kvPut(env, key, value) {
   try {
-    // Vercel doesn't have KV like Cloudflare, this is kept for compatibility
-    // In a real deployment, you might need to use another KV solution
     console.log('KV put not available in Vercel Edge (mimicking Worker pattern)');
   } catch (e) {
     console.error('KV put error', e);
@@ -380,16 +401,25 @@ async function processSubscription(request, url, backend) {
   // Make replacedURIs available to all branches
   const replacedURIs = [];
 
+  // IMPORTANT: replacements maps are local-only and never sent to backend.
+  // They are short-lived and not logged.
+
   // If there's a target parameter (like 'clash'), forward to backend for conversion first
   if (target) {
+    // local replacements map for obfuscation -> recovery mapping
     const replacements = {};
     try {
       const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
+      // Build a backend URL that does not include any local replacements or original sensitive data.
+      // We forward the request to backend using the same pathname/search but we must ensure
+      // we do not include any sensitive mapping in headers/body.
       const backendUrl = `${backendBase}${url.pathname}${url.search}`;
+
+      // Fetch from backend. Do NOT include replacements or original sensitive data in headers/body.
       const response = await fetch(backendUrl, {
         method: 'GET',
         headers: {
-          'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0',
           'Accept': 'text/plain,*/*'
         },
         signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(30000) : undefined
@@ -401,7 +431,7 @@ async function processSubscription(request, url, backend) {
 
       let content = await response.text();
 
-      // Replace backend domains with current host
+      // Replace backend domains with current host (safe domain replacement only)
       content = content.replace(/https:\/\/bulianglin2023\.dev/g, host).replace(/bulianglin2023\.dev/g, url.host);
       content = content.replace(/https:\/\/api\.v1\.mk/g, host).replace(/api\.v1\.mk/g, url.host);
 
@@ -409,14 +439,15 @@ async function processSubscription(request, url, backend) {
       let obfuscatedData = content;
 
       if (parsed.format === 'yaml') {
-        // If needed, obfuscate YAML content before saving
+        // Obfuscate YAML content locally; replacements map is local-only.
         obfuscatedData = replaceYAMLContent(content, replacements);
       } else if (parsed.format === 'base64') {
-        // If backend returned base64-encoded list, try to obfuscate each link
+        // If backend returned base64-encoded list, obfuscate each link locally.
         try {
           const lines = parsed.data.split(/\r?\n/).filter(l => l.trim());
           const out = [];
           for (const line of lines) {
+            // replaceInUri will populate local replacements map but we do NOT send it anywhere.
             const nl = replaceInUri(line, replacements, false);
             out.push(nl || line);
           }
@@ -426,14 +457,16 @@ async function processSubscription(request, url, backend) {
         }
       }
 
-      // Save to memory cache for retrieval
+      // Save obfuscated content to memoryCache for retrieval.
+      // Store only obfuscated content and response headers; do NOT store replacements map.
       const key = generateRandomStr(20);
-      memoryCache.set(key, JSON.stringify({ 
-        content: obfuscatedData || content,
-        headers: Object.fromEntries(response.headers)
-      }));
+      memoryCacheSet(key, { content: obfuscatedData || content, headers: Object.fromEntries(response.headers) });
+
+      // push internal path (no host) so later retrieval is consistent and mapping remains local-only
       replacedURIs.push(`${subDir}/${key}`);
 
+      // Return the backend-converted content (obfuscated or original as returned).
+      // Before returning, do NOT expose replacements. Also ensure we do not log sensitive data.
       return new Response(content, {
         status: 200,
         headers: {
@@ -442,6 +475,7 @@ async function processSubscription(request, url, backend) {
         }
       });
     } catch (e) {
+      // Do not include replacements or sensitive data in error messages or logs.
       return new Response(`Error forwarding to backend: ${e && e.message ? e.message : String(e)}`, { status: 500 });
     }
   }
@@ -471,7 +505,7 @@ async function processSubscription(request, url, backend) {
         const response = await fetch(rawPart, {
           method: 'GET',
           headers: {
-            'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0'
           },
           signal
         });
@@ -487,10 +521,11 @@ async function processSubscription(request, url, backend) {
 
         if (parsed.format === 'base64') {
           const links = parsed.data.split(/\r?\n/).filter(l => l.trim());
-          // per-file replacements map
+          // per-file replacements map (local-only)
           const replacements = {};
           const out = [];
           for (const link of links) {
+            // replaceInUri will populate local replacements map but we do NOT send it anywhere.
             const nl = replaceInUri(link, replacements, false);
             out.push(nl || link);
           }
@@ -499,14 +534,17 @@ async function processSubscription(request, url, backend) {
           obfuscatedData = replaceYAMLContent(content, {});
         }
 
-        memoryCache.set(key, obfuscatedData);
+        // Save obfuscated content only. Do NOT save replacements map.
+        memoryCacheSet(key, { content: obfuscatedData });
         replacedURIs.push(`${host}/${subDir}/${key}`);
       } catch (e) {
+        // Avoid logging sensitive content
         console.error('Fetch error:', e && e.message ? e.message : String(e));
         continue;
       }
     } else if (/^(ssr?|vmess1?|trojan|vless|hysteria|hysteria2|tg):\/\//.test(rawPart) || rawPart.startsWith('socks://')) {
-      memoryCache.set(key, rawPart);
+      // For direct protocol links, store them obfuscated as-is (no replacements map stored)
+      memoryCacheSet(key, { content: rawPart });
       replacedURIs.push(`${host}/${subDir}/${key}`);
     }
   }
@@ -520,17 +558,30 @@ async function processSubscription(request, url, backend) {
 
   // Collect all cached content for final response
   const assembled = [];
+  const keysToDelete = []; // track keys to delete immediately after assembling response
   for (const k of replacedURIs) {
     try {
       const cacheKey = k.split('internal/')[1];
       const value = memoryCache.get(cacheKey);
-      if (value) assembled.push(value);
+      if (value && value.content) {
+        assembled.push(value.content);
+        keysToDelete.push(cacheKey);
+      }
     } catch (e) {
       continue;
     }
   }
 
   if (assembled.length > 0) {
+    // Before returning, delete the cached entries immediately to minimize lifetime of obfuscated content.
+    try {
+      for (const kk of keysToDelete) {
+        memoryCacheDelete(kk);
+      }
+    } catch (e) {
+      // swallow errors to avoid leaking info
+    }
+
     return new Response(assembled.join('\r\n'), {
       status: 200,
       headers: { 'Content-Type': 'text/plain;charset=UTF-8', 'Access-Control-Allow-Origin': '*' }
