@@ -389,9 +389,6 @@ async function processSubscription(request, url, backend) {
       }
 
       let content = await response.text();
-      const buffer = await response.arrayBuffer();
-      const decoder = new TextDecoder('utf-8');
-      content = decoder.decode(buffer);
 
       // Replace backend domains with current host
       content = content.replace(/https:\/\/bulianglin2023\.dev/g, host).replace(/bulianglin2023\.dev/g, url.host);
