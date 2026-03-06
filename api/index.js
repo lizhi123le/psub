@@ -281,6 +281,8 @@ function replaceSocks(link, replacements, isRecovery) {
       if (!serverMatch) return link;
       const serverRaw = serverMatch[1];
       replacements[fakeIP] = serverRaw;
+      const randomPass = generateRandomStr(12);
+      const port = serverMatch[3];
       if (pass) replacements[randomPass] = pass;
       return `socks://${utf8ToBase64(user + ":" + randomPass)}@${fakeIP}:${port}${hashPart}`;
     } else {
@@ -288,7 +290,7 @@ function replaceSocks(link, replacements, isRecovery) {
       if (!serverMatch) return link;
       const serverRaw = serverMatch[1];
       replacements[fakeIP] = serverRaw;
-      return `socks://${fakeIP}:${port}${hashPart}`;
+      return `socks://${fakeIP}:${serverMatch[3]}${hashPart}`;
     }
   } catch (e) { return link; }
 }
@@ -301,7 +303,7 @@ function replaceHysteria(link, replacements, isRecovery) {
   const server = normalizeServer(rawHost);
 
   if (isRecovery) {
-    const original = replacements[serverRaw] || replacements[rawHost];
+    const original = replacements[server] || replacements[rawHost];
     return original ? link.replace(rawHost, original) : link;
   } else {
     const randomDomain = generateRandomStr(12) + ".com";
@@ -319,7 +321,7 @@ function replaceHysteria2(link, replacements, isRecovery) {
   const server = normalizeServer(rawHost);
 
   if (isRecovery) {
-    const original = replacements[serverRaw] || replacements[rawHost];
+    const original = replacements[server] || replacements[rawHost];
     return original ? link.replace(rawHost, original) : link;
   } else {
     const randomDomain = generateRandomStr(10) + ".com";
