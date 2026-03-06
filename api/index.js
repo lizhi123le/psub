@@ -63,23 +63,6 @@ function parseData(data) {
   return { format: "unknown", data: data };
 }
 
-// Robust UTF-8 <-> Base64 helpers using TextEncoder/TextDecoder
-function utf8ToBase64(str) {
-  const bytes = new TextEncoder().encode(str);
-  let binary = '';
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-function base64ToUtf8Safe(b64) {
-  const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
-  const base64 = padded.replace(/-/g, "+").replace(/_/g, "/");
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return new TextDecoder().decode(bytes);
-}
-
 // IPv6 normalization and host extraction helpers
 function normalizeServer(server) {
   if (!server) return server;
@@ -162,23 +145,6 @@ async function kvPut(env, key, value) {
 function getHost(request) {
   const u = new URL(request.url);
   return `${u.protocol}//${u.host}`;
-}
-
-// Robust UTF-8 <-> Base64 helpers using TextEncoder/TextDecoder
-function utf8ToBase64(str) {
-  const bytes = new TextEncoder().encode(str);
-  let binary = '';
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-function base64ToUtf8Safe(b64) {
-  const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
-  const base64 = padded.replace(/-/g, "+").replace(/_/g, "/");
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return new TextDecoder().decode(bytes);
 }
 
 // Replace function for different protocols with obfuscation helpers
@@ -384,19 +350,6 @@ function replaceYAMLContent(content, replacements) {
     return `password: ${randomPass}`;
   });
   return result;
-}
-
-// --- IPv6 normalization and host extraction helpers ---
-function normalizeServer(server) {
-  if (!server) return server;
-  try {
-    server = decodeURIComponent(server);
-  } catch (e) {}
-  if (server.startsWith('[') && server.endsWith(']')) return server.slice(1, -1);
-  if (/^%5B/i.test(server) && /%5D$/i.test(server)) {
-    return server.replace(/^%5B/i, '').replace(/%5D$/i, '');
-  }
-  return server;
 }
 
 // Process subscription and replace with local URLs
