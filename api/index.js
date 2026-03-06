@@ -405,7 +405,7 @@ async function processSubscription(request, url, backend) {
       const key = generateRandomStr(20);
       memoryCache.set(key, JSON.stringify({ 
         content: obfuscatedData || content,
-        headers: response.headers.raw() 
+        headers: Object.fromEntries(response.headers)
       }));
       replacedURIs.push(`${subDir}/${key}`);
 
