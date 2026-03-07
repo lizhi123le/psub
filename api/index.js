@@ -391,11 +391,36 @@ function replaceYAMLContent(content, replacements) {
 async function processSubscription(request, url, backend) {
   const host = getHost(request);
   const subDir = 'internal';
-  const targetUrl = url.searchParams.get('url');
+
+  // Use getFullUrl to robustly extract long/tricky url params
+  const targetUrl = getFullUrl(request.url) || url.searchParams.get('url');
   const target = url.searchParams.get('target');
 
+  // If still no targetUrl, forward to backend /sub and return its response
   if (!targetUrl) {
-    return new Response('Missing url parameter', { status: 400 });
+    try {
+      const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
+      const backendUrl = `${backendBase}${url.pathname}${url.search}`;
+      const response = await fetch(backendUrl, {
+        method: 'GET',
+        headers: {
+          'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0',
+          'Accept': 'text/plain,*/*'
+        },
+        signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(30000) : undefined
+      });
+
+      const text = await response.text();
+      return new Response(text, {
+        status: response.status,
+        headers: {
+          'Content-Type': response.headers.get('Content-Type') || 'text/plain; charset=utf-8',
+          'Access-Control-Allow-Origin': '*'
+        }
+      });
+    } catch (e) {
+      return new Response(`Error forwarding to backend: ${e && e.message ? e.message : String(e)}`, { status: 500 });
+    }
   }
 
   // Make replacedURIs available to all branches
@@ -406,16 +431,10 @@ async function processSubscription(request, url, backend) {
 
   // If there's a target parameter (like 'clash'), forward to backend for conversion first
   if (target) {
-    // local replacements map for obfuscation -> recovery mapping
     const replacements = {};
     try {
       const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
-      // Build a backend URL that does not include any local replacements or original sensitive data.
-      // We forward the request to backend using the same pathname/search but we must ensure
-      // we do not include any sensitive mapping in headers/body.
       const backendUrl = `${backendBase}${url.pathname}${url.search}`;
-
-      // Fetch from backend. Do NOT include replacements or original sensitive data in headers/body.
       const response = await fetch(backendUrl, {
         method: 'GET',
         headers: {
@@ -439,15 +458,12 @@ async function processSubscription(request, url, backend) {
       let obfuscatedData = content;
 
       if (parsed.format === 'yaml') {
-        // Obfuscate YAML content locally; replacements map is local-only.
         obfuscatedData = replaceYAMLContent(content, replacements);
       } else if (parsed.format === 'base64') {
-        // If backend returned base64-encoded list, obfuscate each link locally.
         try {
           const lines = parsed.data.split(/\r?\n/).filter(l => l.trim());
           const out = [];
           for (const line of lines) {
-            // replaceInUri will populate local replacements map but we do NOT send it anywhere.
             const nl = replaceInUri(line, replacements, false);
             out.push(nl || line);
           }
@@ -457,16 +473,10 @@ async function processSubscription(request, url, backend) {
         }
       }
 
-      // Save obfuscated content to memoryCache for retrieval.
-      // Store only obfuscated content and response headers; do NOT store replacements map.
       const key = generateRandomStr(20);
       memoryCacheSet(key, { content: obfuscatedData || content, headers: Object.fromEntries(response.headers) });
-
-      // push internal path (no host) so later retrieval is consistent and mapping remains local-only
       replacedURIs.push(`${subDir}/${key}`);
 
-      // Return the backend-converted content (obfuscated or original as returned).
-      // Before returning, do NOT expose replacements. Also ensure we do not log sensitive data.
       return new Response(content, {
         status: 200,
         headers: {
@@ -475,7 +485,6 @@ async function processSubscription(request, url, backend) {
         }
       });
     } catch (e) {
-      // Do not include replacements or sensitive data in error messages or logs.
       return new Response(`Error forwarding to backend: ${e && e.message ? e.message : String(e)}`, { status: 500 });
     }
   }
@@ -492,7 +501,6 @@ async function processSubscription(request, url, backend) {
 
     if (rawPart.startsWith('http://') || rawPart.startsWith('https://')) {
       try {
-        // create a controller and set a timeout if AbortSignal.timeout is not available
         let signal;
         if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
           signal = AbortSignal.timeout(30000);
@@ -521,11 +529,9 @@ async function processSubscription(request, url, backend) {
 
         if (parsed.format === 'base64') {
           const links = parsed.data.split(/\r?\n/).filter(l => l.trim());
-          // per-file replacements map (local-only)
           const replacements = {};
           const out = [];
           for (const link of links) {
-            // replaceInUri will populate local replacements map but we do NOT send it anywhere.
             const nl = replaceInUri(link, replacements, false);
             out.push(nl || link);
           }
@@ -534,16 +540,13 @@ async function processSubscription(request, url, backend) {
           obfuscatedData = replaceYAMLContent(content, {});
         }
 
-        // Save obfuscated content only. Do NOT save replacements map.
         memoryCacheSet(key, { content: obfuscatedData });
         replacedURIs.push(`${host}/${subDir}/${key}`);
       } catch (e) {
-        // Avoid logging sensitive content
         console.error('Fetch error:', e && e.message ? e.message : String(e));
         continue;
       }
     } else if (/^(ssr?|vmess1?|trojan|vless|hysteria|hysteria2|tg):\/\//.test(rawPart) || rawPart.startsWith('socks://')) {
-      // For direct protocol links, store them obfuscated as-is (no replacements map stored)
       memoryCacheSet(key, { content: rawPart });
       replacedURIs.push(`${host}/${subDir}/${key}`);
     }
