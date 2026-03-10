@@ -486,7 +486,9 @@ async function processSubscription(request, urlObj, backend, env) {
           .replace(/https:\/\/bulianglin2023\.dev/g, host)
           .replace(/bulianglin2023\.dev/g, urlObj.host)
           .replace(new RegExp(`https://${escapeRegExp(backendHost)}`, 'g'), host)
-          .replace(backendRegex, urlObj.host);
+          .replace(backendRegex, urlObj.host)
+          .replace(/http:\/\/127\.0\.0\.1:25500/g, host)
+          .replace(/127\.0\.0\.1:25500/g, urlObj.host);
       };
       
       const parsedContext = parseData(content);
@@ -587,7 +589,9 @@ export default {
               .replace(/https:\/\/bulianglin2023\.dev/g, host)
               .replace(/bulianglin2023\.dev/g, url.host)
               .replace(new RegExp(`https://${escapeRegExp(backendHost)}`, 'g'), host)
-              .replace(backendRegex, url.host);
+              .replace(backendRegex, url.host)
+              .replace(/http:\/\/127\.0\.0\.1:25500/g, host)
+              .replace(/127\.0\.0\.1:25500/g, url.host);
           } catch (e) {
             console.error('Frontend replacement error:', e);
           }
