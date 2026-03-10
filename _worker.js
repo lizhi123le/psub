@@ -476,6 +476,29 @@ async function processSubscription(request, urlObj, backend, env) {
     });
 
     let content = await response.text();
+    
+    // Replace backend domains with current host dynamically
+    try {
+      const backendHost = new URL(backend).host;
+      const backendRegex = new RegExp(escapeRegExp(backendHost), 'g');
+      const replaceDomains = (str) => {
+        return str
+          .replace(/https:\/\/bulianglin2023\.dev/g, host)
+          .replace(/bulianglin2023\.dev/g, urlObj.host)
+          .replace(new RegExp(`https://${escapeRegExp(backendHost)}`, 'g'), host)
+          .replace(backendRegex, urlObj.host);
+      };
+      
+      const parsedContext = parseData(content);
+      if (parsedContext.format === 'base64') {
+        const replaced = replaceDomains(parsedContext.data);
+        content = utf8ToBase64(replaced);
+      } else {
+        content = replaceDomains(content);
+      }
+    } catch (e) {
+      console.error('Domain replace error:', e);
+    }
 
     const backendIndicatesNoNodes = /no nodes were found|no valid nodes found|not found/i.test(content);
     if (!response.ok || backendIndicatesNoNodes) {
@@ -549,14 +572,26 @@ export default {
     const BACKEND = env.BACKEND || 'https://api.v1.mk';
     const url = new URL(request.url);
 
-    // Home page: fetch remote frontend and return it WITHOUT doing host replacements
+    // Home page: fetch remote frontend and return it with host replacements
     if (url.pathname === '/' || url.pathname === '/index.html') {
       try {
         const frontendUrl = "https://raw.githubusercontent.com/lizhi123le/psub/refs/heads/main/index.html";
         const res = await fetch(frontendUrl);
         if (res.ok) {
-          const html = await res.text();
-          return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+          let content = await res.text();
+          const host = `${url.protocol}//${url.host}`;
+          try {
+            const backendHost = new URL(BACKEND).host;
+            const backendRegex = new RegExp(escapeRegExp(backendHost), 'g');
+            content = content
+              .replace(/https:\/\/bulianglin2023\.dev/g, host)
+              .replace(/bulianglin2023\.dev/g, url.host)
+              .replace(new RegExp(`https://${escapeRegExp(backendHost)}`, 'g'), host)
+              .replace(backendRegex, url.host);
+          } catch (e) {
+            console.error('Frontend replacement error:', e);
+          }
+          return new Response(content, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
         }
       } catch (e) {
         // fall through to default minimal page

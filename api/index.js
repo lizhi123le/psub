@@ -450,9 +450,28 @@ async function processSubscription(request, url, backend) {
 
       let content = await response.text();
 
-      // Replace backend domains with current host (safe domain replacement only)
-      content = content.replace(/https:\/\/bulianglin2023\.dev/g, host).replace(/bulianglin2023\.dev/g, url.host);
-      content = content.replace(/https:\/\/api\.v1\.mk/g, host).replace(/api\.v1\.mk/g, url.host);
+      // Dynamically replace backend domains and handle Base64
+      try {
+        const backendHost = new URL(backend).host;
+        const backendRegex = new RegExp(escapeRegExp(backendHost), 'g');
+        const replaceDomains = (str) => {
+          return str
+            .replace(/https:\/\/bulianglin2023\.dev/g, host)
+            .replace(/bulianglin2023\.dev/g, url.host)
+            .replace(new RegExp(`https://${escapeRegExp(backendHost)}`, 'g'), host)
+            .replace(backendRegex, url.host);
+        };
+        
+        const parsedContext = parseData(content);
+        if (parsedContext.format === 'base64') {
+          const replaced = replaceDomains(parsedContext.data);
+          content = utf8ToBase64(replaced);
+        } else {
+          content = replaceDomains(content);
+        }
+      } catch (e) {
+        console.error('Domain replace error:', e);
+      }
 
       const parsed = parseData(content);
       let obfuscatedData = content;
@@ -601,19 +620,39 @@ export default async function handler(request) {
   // Root - return index.html template
   if (url.pathname === '/' || url.pathname === '') {
     try {
-      let html = `<!DOCTYPE html>`;
-      html += '<html><head><title>psub</title></head><body>';
-      html += '<h1>psub</h1><p>Subscription Converter (Vercel Edge Enhanced)</p>';
-      html += '<p>Backend API: <code>' + BACKEND.replace(/(https?:\/\/[^/]+).*$/, "$1") + '</code></p>';
-      html += '<p>Use: /sub?url=YOUR_SUBSCRIPTION_URL</p>';
-      html += '<p>Version: /version</p></body></html>';
-
-      return new Response(html, {
-        headers: { 'Content-Type': 'text/html; charset=utf-8' }
-      });
+      const frontendUrl = "https://raw.githubusercontent.com/lizhi123le/psub/refs/heads/main/index.html";
+      const res = await fetch(frontendUrl);
+      if (res.ok) {
+        let content = await res.text();
+        const host = `${url.protocol}//${url.host}`;
+        try {
+          const backendHost = new URL(BACKEND).host;
+          const backendRegex = new RegExp(escapeRegExp(backendHost), 'g');
+          content = content
+            .replace(/https:\/\/bulianglin2023\.dev/g, host)
+            .replace(/bulianglin2023\.dev/g, url.host)
+            .replace(new RegExp(`https://${escapeRegExp(backendHost)}`, 'g'), host)
+            .replace(backendRegex, url.host);
+        } catch (e) {
+          console.error('Frontend replacement error:', e);
+        }
+        return new Response(content, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+      }
     } catch (e) {
       console.error('Error loading index.html:', e);
     }
+    
+    // Fallback minimal page
+    let html = `<!DOCTYPE html>`;
+    html += '<html><head><title>psub</title></head><body>';
+    html += '<h1>psub</h1><p>Subscription Converter (Vercel Edge Enhanced)</p>';
+    html += '<p>Backend API: <code>' + BACKEND.replace(/(https?:\/\/[^/]+).*$/, "$1") + '</code></p>';
+    html += '<p>Use: /sub?url=YOUR_SUBSCRIPTION_URL</p>';
+    html += '<p>Version: /version</p></body></html>';
+
+    return new Response(html, {
+      headers: { 'Content-Type': 'text/html; charset=utf-8' }
+    });
   }
 
   // Version endpoint
