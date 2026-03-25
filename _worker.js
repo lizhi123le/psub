@@ -479,11 +479,14 @@ async function processSubscription(request, urlObj, backend, env) {
     
     // Replace backend domains with current host dynamically
     try {
-      // Only replace hardcoded default domains, keep user-configured BACKEND as-is
+      const backendHost = new URL(backend).host;
+      const backendRegex = new RegExp(escapeRegExp(backendHost), 'g');
       const replaceDomains = (str) => {
         return str
           .replace(/https:\/\/bulianglin2023\.dev/g, host)
           .replace(/bulianglin2023\.dev/g, urlObj.host)
+          .replace(new RegExp(`https://${escapeRegExp(backendHost)}`, 'g'), host)
+          .replace(backendRegex, urlObj.host)
           .replace(/http:\/\/127\.0\.0\.1:25500/g, host)
           .replace(/127\.0\.0\.1:25500/g, urlObj.host);
       };
@@ -583,9 +586,7 @@ export default {
             // Only replace hardcoded default domains, keep user-configured BACKEND as-is
             content = content
               .replace(/https:\/\/bulianglin2023\.dev/g, host)
-              .replace(/bulianglin2023\.dev/g, url.host)
-              .replace(/http:\/\/127\.0\.0\.1:25500/g, host)
-              .replace(/127\.0\.0\.1:25500/g, url.host);
+              .replace(/bulianglin2023\.dev/g, url.host);
           } catch (e) {
             console.error('Frontend replacement error:', e);
           }
