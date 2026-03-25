@@ -479,14 +479,11 @@ async function processSubscription(request, urlObj, backend, env) {
     
     // Replace backend domains with current host dynamically
     try {
-      const backendHost = new URL(backend).host;
-      const backendRegex = new RegExp(escapeRegExp(backendHost), 'g');
+      // Only replace hardcoded default domains, keep user-configured BACKEND as-is
       const replaceDomains = (str) => {
         return str
           .replace(/https:\/\/bulianglin2023\.dev/g, host)
           .replace(/bulianglin2023\.dev/g, urlObj.host)
-          .replace(new RegExp(`https://${escapeRegExp(backendHost)}`, 'g'), host)
-          .replace(backendRegex, urlObj.host)
           .replace(/http:\/\/127\.0\.0\.1:25500/g, host)
           .replace(/127\.0\.0\.1:25500/g, urlObj.host);
       };
@@ -583,13 +580,10 @@ export default {
           let content = await res.text();
           const host = `${url.protocol}//${url.host}`;
           try {
-            const backendHost = new URL(BACKEND).host;
-            const backendRegex = new RegExp(escapeRegExp(backendHost), 'g');
+            // Only replace hardcoded default domains, keep user-configured BACKEND as-is
             content = content
               .replace(/https:\/\/bulianglin2023\.dev/g, host)
               .replace(/bulianglin2023\.dev/g, url.host)
-              .replace(new RegExp(`https://${escapeRegExp(backendHost)}`, 'g'), host)
-              .replace(backendRegex, url.host)
               .replace(/http:\/\/127\.0\.0\.1:25500/g, host)
               .replace(/127\.0\.0\.1:25500/g, url.host);
           } catch (e) {
