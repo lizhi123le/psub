@@ -395,8 +395,10 @@ async function processSubscription(request, urlObj, backend, env) {
   const keys = [];
 
   const urlParts = targetUrl.split('|').filter(p => p.trim() !== '');
+  let lastYieldTime = Date.now();
 
   for (const part of urlParts) {
+    if (Date.now() - lastYieldTime > 5) { await new Promise(r => setTimeout(r, 0)); lastYieldTime = Date.now(); }
     const key = generateRandomStr(16);
     let plaintextData = "";
     let responseHeaders = {};
@@ -431,6 +433,7 @@ async function processSubscription(request, urlObj, backend, env) {
         const links = parsed.data.split(/\r?\n/).filter(l => l.trim());
         const newLinks = [];
         for (const link of links) {
+          if (Date.now() - lastYieldTime > 5) { await new Promise(r => setTimeout(r, 0)); lastYieldTime = Date.now(); }
           const nl = replaceInUri(link, replacements, false);
           newLinks.push(nl || link);
         }
@@ -505,7 +508,9 @@ async function processSubscription(request, urlObj, backend, env) {
     const backendIndicatesNoNodes = /no nodes were found|no valid nodes found|not found/i.test(content);
     if (!response.ok || backendIndicatesNoNodes) {
       const assembled = [];
+      let lastYieldTime = Date.now();
       for (const k of keys) {
+        if (Date.now() - lastYieldTime > 5) { await new Promise(r => setTimeout(r, 0)); lastYieldTime = Date.now(); }
         const c = await kvGet(env, k);
         if (c) assembled.push(c);
       }
@@ -514,17 +519,24 @@ async function processSubscription(request, urlObj, backend, env) {
         if (target === 'base64') {
           content = assembled.join('|');
         } else {
-          const decodedParts = assembled.map(p => {
+          let lastYieldTime = Date.now();
+          const decodedParts = [];
+          for (const p of assembled) {
+            if (Date.now() - lastYieldTime > 5) { await new Promise(r => setTimeout(r, 0)); lastYieldTime = Date.now(); }
             try {
               const dec = urlSafeBase64Decode(p);
-              if (dec && (dec.includes('://') || dec.includes('proxies:') || dec.includes('port:'))) return dec;
-            } catch (e) {}
-            return p;
-          });
+              if (dec && (dec.includes('://') || dec.includes('proxies:') || dec.includes('port:'))) decodedParts.push(dec);
+              else decodedParts.push(p);
+            } catch (e) {
+              decodedParts.push(p);
+            }
+          }
           content = decodedParts.join('\r\n');
         }
 
+        let lastYieldTime = Date.now();
         for (const k of keys) {
+          if (Date.now() - lastYieldTime > 5) { await new Promise(r => setTimeout(r, 0)); lastYieldTime = Date.now(); }
           try { await env.SUB_BUCKET.delete(k); await env.SUB_BUCKET.delete(k + "_headers"); } catch (e) {}
           localCache.delete(k); localCache.delete(k + "_headers");
         }
@@ -540,11 +552,17 @@ async function processSubscription(request, urlObj, backend, env) {
     if (Object.keys(replacements).length > 0) {
       const recoveryRegex = new RegExp(Object.keys(replacements).map(escapeRegExp).join("|"), "g");
       const target = urlObj.searchParams.get("target");
+      let lastYieldTime = Date.now();
       try {
         const decoded = urlSafeBase64Decode(content);
         if (decoded && (decoded.includes("://") || decoded.includes("proxies:") || decoded.includes("port:"))) {
-          const recovered = decoded.replace(recoveryRegex, (m) => replacements[m] || m);
-          content = (target === "base64") ? utf8ToBase64(recovered) : recovered;
+          const lines = decoded.split(/\r?\n/);
+          const recovered = [];
+          for (const line of lines) {
+            if (Date.now() - lastYieldTime > 5) { await new Promise(r => setTimeout(r, 0)); lastYieldTime = Date.now(); }
+            recovered.push(line.replace(recoveryRegex, (m) => replacements[m] || m));
+          }
+          content = (target === "base64") ? utf8ToBase64(recovered.join("\r\n")) : recovered.join("\r\n");
         } else {
           content = content.replace(recoveryRegex, (m) => replacements[m] || m);
         }
@@ -553,7 +571,9 @@ async function processSubscription(request, urlObj, backend, env) {
       }
     }
 
+    let lastYieldTime = Date.now();
     for (const k of keys) {
+      if (Date.now() - lastYieldTime > 5) { await new Promise(r => setTimeout(r, 0)); lastYieldTime = Date.now(); }
       try { await env.SUB_BUCKET.delete(k); await env.SUB_BUCKET.delete(k + "_headers"); } catch (e) {}
       localCache.delete(k); localCache.delete(k + "_headers");
     }
