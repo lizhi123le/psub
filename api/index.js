@@ -90,13 +90,14 @@ function parseData(data) {
   return { format: "unknown", data: data };
 }
 
-// IPv6 normalization and host extraction helpers
+// Normalize hostname: decodeURI, strip IPv6 brackets, handle URL-encoded brackets
 function normalizeServer(server) {
   if (!server) return server;
   try {
     server = decodeURIComponent(server);
   } catch (e) {}
-  if (server.startsWith('[') && server.endsWith(']')) return server.slice(1, -1);
+  const h = String(server);
+  if (h.startsWith('[') && h.endsWith(']')) return h.slice(1, -1);
   if (/^%5B/i.test(server) && /%5D$/i.test(server)) {
     return server.replace(/^%5B/i, '').replace(/%5D$/i, '');
   }
@@ -154,8 +155,8 @@ function getHost(request) {
 // Replace function for different protocols with obfuscation helpers
 function replaceInUri(link, replacements, isRecovery) {
   if (!link) return link;
-  if (link.startsWith("ss://")) return _replaceSS(link, replacements, isRecovery);
-  if (link.startsWith("ssr://")) return _replaceSSR(link, replacements, isRecovery);
+  if (link.startsWith("ss://")) return replaceSS(link, replacements, isRecovery);
+  if (link.startsWith("ssr://")) return replaceSSR(link, replacements, isRecovery);
   if (link.startsWith("vmess://")) return replaceVmess(link, replacements, isRecovery);
   if (link.startsWith("trojan://") || link.startsWith("vless://")) return replaceTrojan(link, replacements, isRecovery);
   if (link.startsWith("hysteria://")) return replaceHysteria(link, replacements, isRecovery);
@@ -166,7 +167,7 @@ function replaceInUri(link, replacements, isRecovery) {
 
 // --- Protocol-specific replacement functions ---
 
-function _replaceSS(link, replacements, isRecovery) {
+function replaceSS(link, replacements, isRecovery) {
   const randomPassword = generateRandomStr(12);
   const randomDomain = generateRandomStr(16) + ".com";
   let tempLink = link.slice(5).split("#")[0];
@@ -233,7 +234,7 @@ function replaceTrojan(link, replacements, isRecovery) {
   }
 }
 
-function _replaceSSR(link, replacements, isRecovery) {
+function replaceSSR(link, replacements, isRecovery) {
   try {
     let data = link.slice(6).replace("\r", "").split("#")[0];
     let decoded = base64ToUtf8Safe(data);
@@ -363,6 +364,585 @@ function replaceYAMLContent(content, replacements) {
   return result;
 }
 
+// ============================================================
+// Universal proxy link parser - converts any proxy URI to node object
+// ============================================================
+
+// YAML quote helper (for Clash output - avoid IPv6 brackets being parsed as array)
+function yq(v) {
+  if (v == null) return '""';
+  const s = String(v);
+  return '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+}
+
+// Alias for normalizeServer (used by format generators)
+function normalizeServerHost(hostname) {
+  return normalizeServer(hostname);
+}
+
+// Parse any proxy link into a node object for format conversion
+function parseProxyLink(link) {
+  if (!link) return null;
+  try {
+    // VLESS
+    if (link.startsWith('vless://')) {
+      const url = new URL(link);
+      const p = new URLSearchParams(url.search);
+      return {
+        proto: 'vless',
+        name: decodeURIComponent(url.hash.substring(1)) || (url.hostname + ':' + url.port),
+        uuid: url.username,
+        server: normalizeServerHost(url.hostname),
+        port: parseInt(url.port) || 443,
+        tls: p.get('security') === 'tls' || p.get('security') === 'reality',
+        network: p.get('type') || 'ws',
+        path: p.get('path') || '/',
+        host: normalizeServerHost(p.get('host') || url.hostname),
+        sni: normalizeServerHost(p.get('sni') || p.get('host') || url.hostname),
+        alpn: (p.get('alpn') || '').split(',').map(s => s.trim()).filter(Boolean),
+        fp: p.get('fp') || 'chrome',
+        flow: p.get('flow') || '',
+        encryption: p.get('encryption') || 'none',
+        ech: p.get('ech') || ''
+      };
+    }
+    // Trojan
+    if (link.startsWith('trojan://')) {
+      const url = new URL(link);
+      const p = new URLSearchParams(url.search);
+      return {
+        proto: 'trojan',
+        name: decodeURIComponent(url.hash.substring(1)) || (url.hostname + ':' + url.port),
+        password: decodeURIComponent(url.username),
+        server: normalizeServerHost(url.hostname),
+        port: parseInt(url.port) || 443,
+        tls: true,
+        network: p.get('type') || 'ws',
+        path: p.get('path') || '/',
+        host: normalizeServerHost(p.get('host') || url.hostname),
+        sni: normalizeServerHost(p.get('sni') || p.get('host') || url.hostname),
+        alpn: (p.get('alpn') || '').split(',').map(s => s.trim()).filter(Boolean),
+        fp: p.get('fp') || 'chrome',
+        ech: p.get('ech') || ''
+      };
+    }
+    // VMess
+    if (link.startsWith('vmess://')) {
+      const b64 = link.slice(8);
+      let decoded;
+      try { decoded = base64ToUtf8Safe(b64); } catch (e) { decoded = ''; }
+      // Check if it's JSON format
+      if (decoded.startsWith('{')) {
+        const j = JSON.parse(decoded);
+        return {
+          proto: 'vmess',
+          name: j.ps || j.remarks || (j.add + ':' + j.port),
+          uuid: j.id,
+          server: normalizeServerHost(j.add),
+          port: parseInt(j.port) || 443,
+          tls: j.tls === 'tls' || j.security === 'tls',
+          network: j.net || 'ws',
+          path: j.path || '/',
+          host: normalizeServerHost(j.host || j.add),
+          sni: normalizeServerHost(j.sni || j.host || j.add),
+          aid: parseInt(j.aid) || 0,
+          encryption: j.security || 'auto'
+        };
+      }
+      // Non-JSON vmess (rare, but handle)
+      if (decoded.includes('@')) {
+        const parts = decoded.split('@');
+        const auth = parts[0];
+        const rest = parts[1];
+        const colonIdx = rest.lastIndexOf(':');
+        const serverPort = colonIdx !== -1 ? rest.substring(0, colonIdx) : rest;
+        const port = colonIdx !== -1 ? rest.substring(colonIdx + 1) : '443';
+        return {
+          proto: 'vmess',
+          name: serverPort + ':' + port,
+          uuid: auth,
+          server: normalizeServerHost(serverPort),
+          port: parseInt(port) || 443,
+          tls: false,
+          network: 'ws',
+          path: '/',
+          host: normalizeServerHost(serverPort)
+        };
+      }
+      return null;
+    }
+    // ShadowSocks (ss://)
+    if (link.startsWith('ss://')) {
+      const hashIdx = link.indexOf('#');
+      const name = hashIdx !== -1 ? decodeURIComponent(link.slice(hashIdx + 1)) : '';
+      const cleanLink = hashIdx !== -1 ? link.slice(0, hashIdx) : link;
+      const afterProtocol = cleanLink.slice(5);
+      // Format: ss://base64(method:password)@server:port or ss://base64(method:password@server:port)
+      if (afterProtocol.includes('@')) {
+        const atIdx = afterProtocol.indexOf('@');
+        const b64Part = afterProtocol.slice(0, atIdx);
+        const serverPortStr = afterProtocol.slice(atIdx + 1);
+        const colonIdx = serverPortStr.lastIndexOf(':');
+        const server = colonIdx !== -1 ? serverPortStr.slice(0, colonIdx) : serverPortStr;
+        const port = colonIdx !== -1 ? serverPortStr.slice(colonIdx + 1) : '443';
+        let decoded;
+        try { decoded = base64ToUtf8Safe(b64Part); } catch (e) { decoded = ''; }
+        const methodColon = decoded.indexOf(':');
+        const method = methodColon !== -1 ? decoded.slice(0, methodColon) : decoded;
+        const password = methodColon !== -1 ? decoded.slice(methodColon + 1) : '';
+        return {
+          proto: 'ss',
+          name: name || (server + ':' + port),
+          server: normalizeServerHost(server),
+          port: parseInt(port) || 443,
+          method: method || 'aes-256-gcm',
+          password: password
+        };
+      }
+      // SIP002 format: ss://base64(method:password)@server:port
+      const b64Part = afterProtocol.split('@')[0];
+      let decoded;
+      try { decoded = base64ToUtf8Safe(b64Part); } catch (e) { decoded = ''; }
+      const methodColon = decoded.indexOf(':');
+      const method = methodColon !== -1 ? decoded.slice(0, methodColon) : decoded;
+      const password = methodColon !== -1 ? decoded.slice(methodColon + 1) : '';
+      return {
+        proto: 'ss',
+        name: name || 'ss-node',
+        server: 'localhost',
+        port: 443,
+        method: method || 'aes-256-gcm',
+        password: password
+      };
+    }
+    // ShadowSocksR (ssr://)
+    if (link.startsWith('ssr://')) {
+      const b64 = link.slice(6);
+      let decoded;
+      try { decoded = base64ToUtf8Safe(b64); } catch (e) { decoded = ''; }
+      const hashIdx = decoded.indexOf('#');
+      const name = hashIdx !== -1 ? decodeURIComponent(decoded.slice(hashIdx + 1)) : '';
+      const clean = hashIdx !== -1 ? decoded.slice(0, hashIdx) : decoded;
+      const parts = clean.split(':');
+      if (parts.length >= 6) {
+        const server = parts[0];
+        const port = parts[1];
+        const protocol = parts[2];
+        const method = parts[3];
+        const obfs = parts[4];
+        const rest = parts.slice(5).join(':');
+        const slashIdx = rest.indexOf('/');
+        const passwordB64 = slashIdx !== -1 ? rest.slice(0, slashIdx) : rest;
+        let password;
+        try { password = base64ToUtf8Safe(passwordB64); } catch (e) { password = passwordB64; }
+        return {
+          proto: 'ssr',
+          name: name || (server + ':' + port),
+          server: normalizeServerHost(server),
+          port: parseInt(port) || 443,
+          method: method || 'aes-256-cfb',
+          password: password,
+          protocol: protocol || 'origin',
+          obfs: obfs || 'plain'
+        };
+      }
+      return null;
+    }
+    // Hysteria
+    if (link.startsWith('hysteria://') || link.startsWith('hy://')) {
+      const url = new URL(link.replace(/^hy:\/\//, 'hysteria://'));
+      const p = new URLSearchParams(url.search);
+      return {
+        proto: 'hysteria',
+        name: decodeURIComponent(url.hash.substring(1)) || (url.hostname + ':' + url.port),
+        server: normalizeServerHost(url.hostname),
+        port: parseInt(url.port) || 443,
+        protocol: p.get('protocol') || 'udp',
+        up: p.get('up') || p.get('up_mbps') || '50',
+        down: p.get('down') || p.get('down_mbps') || '100',
+        alpn: (p.get('alpn') || '').split(',').map(s => s.trim()).filter(Boolean),
+        obfs: p.get('obfs') || ''
+      };
+    }
+    // Hysteria2
+    if (link.startsWith('hysteria2://') || link.startsWith('hy2://')) {
+      const url = new URL(link.replace(/^hy2:\/\//, 'hysteria2://'));
+      const p = new URLSearchParams(url.search);
+      const password = url.username;
+      return {
+        proto: 'hysteria2',
+        name: decodeURIComponent(url.hash.substring(1)) || (url.hostname + ':' + url.port),
+        password: password,
+        server: normalizeServerHost(url.hostname),
+        port: parseInt(url.port) || 443,
+        up: p.get('up') || p.get('up_mbps') || '50',
+        down: p.get('down') || p.get('down_mbps') || '100',
+        obfs: p.get('obfs') || '',
+        obfs_password: p.get('obfs-password') || '',
+        sni: normalizeServerHost(p.get('sni') || url.hostname)
+      };
+    }
+    // SOCKS
+    if (link.startsWith('socks://') || link.startsWith('socks5://')) {
+      const clean = link.replace(/^socks5?:\/\//, '');
+      const hashIdx = clean.indexOf('#');
+      const name = hashIdx !== -1 ? decodeURIComponent(clean.slice(hashIdx + 1)) : '';
+      const serverPortStr = hashIdx !== -1 ? clean.slice(0, hashIdx) : clean;
+      const atIdx = serverPortStr.indexOf('@');
+      if (atIdx !== -1) {
+        const authB64 = serverPortStr.slice(0, atIdx);
+        const sp = serverPortStr.slice(atIdx + 1);
+        const colonIdx = sp.lastIndexOf(':');
+        const server = colonIdx !== -1 ? sp.slice(0, colonIdx) : sp;
+        const port = colonIdx !== -1 ? sp.slice(colonIdx + 1) : '443';
+        let auth;
+        try { auth = base64ToUtf8Safe(authB64); } catch (e) { auth = ''; }
+        const userColon = auth.indexOf(':');
+        const username = userColon !== -1 ? auth.slice(0, userColon) : auth;
+        const password = userColon !== -1 ? auth.slice(userColon + 1) : '';
+        return {
+          proto: 'socks5',
+          name: name || (server + ':' + port),
+          server: normalizeServerHost(server),
+          port: parseInt(port) || 443,
+          username: username,
+          password: password
+        };
+      }
+      const colonIdx = serverPortStr.lastIndexOf(':');
+      const server = colonIdx !== -1 ? serverPortStr.slice(0, colonIdx) : serverPortStr;
+      const port = colonIdx !== -1 ? serverPortStr.slice(colonIdx + 1) : '443';
+      return {
+        proto: 'socks5',
+        name: name || (server + ':' + port),
+        server: normalizeServerHost(server),
+        port: parseInt(port) || 443
+      };
+    }
+  } catch (e) {
+    return null;
+  }
+  return null;
+}
+
+// ============================================================
+// Local output format generators (no backend dependency)
+// ============================================================
+
+// Build a single Clash node YAML block from a parsed node
+function buildClashNodeLine(n) {
+  const lines = [];
+  const server = normalizeServerHost(n.server);
+  const host = normalizeServerHost(n.host) || server;
+  const sni = normalizeServerHost(n.sni) || host;
+
+  lines.push(`  - name: ${yq(n.name)}`);
+
+  if (n.proto === 'vless' || n.proto === 'vmess') {
+    lines.push(`    type: ${n.proto}`);
+    lines.push(`    server: ${yq(server)}`);
+    lines.push(`    port: ${n.port}`);
+    lines.push(`    uuid: ${n.uuid}`);
+    lines.push(`    udp: true`);
+    if (n.flow) lines.push(`    flow: ${yq(n.flow)}`);
+    lines.push(`    tls: ${n.tls ? 'true' : 'false'}`);
+    lines.push(`    client-fingerprint: ${yq(n.fp || 'chrome')}`);
+    if (n.aid !== undefined) lines.push(`    alter-id: ${n.aid}`);
+  } else if (n.proto === 'trojan') {
+    lines.push(`    type: trojan`);
+    lines.push(`    server: ${yq(server)}`);
+    lines.push(`    port: ${n.port}`);
+    lines.push(`    password: ${yq(n.password)}`);
+    lines.push(`    udp: true`);
+    lines.push(`    client-fingerprint: ${yq(n.fp || 'chrome')}`);
+  } else if (n.proto === 'ss') {
+    lines.push(`    type: ss`);
+    lines.push(`    server: ${yq(server)}`);
+    lines.push(`    port: ${n.port}`);
+    lines.push(`    cipher: ${n.method || 'aes-256-gcm'}`);
+    lines.push(`    password: ${yq(n.password)}`);
+  } else if (n.proto === 'ssr') {
+    lines.push(`    type: ssr`);
+    lines.push(`    server: ${yq(server)}`);
+    lines.push(`    port: ${n.port}`);
+    lines.push(`    cipher: ${n.method || 'aes-256-cfb'}`);
+    lines.push(`    password: ${yq(n.password)}`);
+    lines.push(`    protocol: ${n.protocol || 'origin'}`);
+    lines.push(`    obfs: ${n.obfs || 'plain'}`);
+  } else if (n.proto === 'hysteria' || n.proto === 'hysteria2') {
+    lines.push(`    type: hysteria2`);
+    lines.push(`    server: ${yq(server)}`);
+    lines.push(`    port: ${n.port}`);
+    if (n.password) lines.push(`    password: ${yq(n.password)}`);
+    lines.push(`    up: ${n.up || '50'}`);
+    lines.push(`    down: ${n.down || '100'}`);
+    if (n.sni) lines.push(`    sni: ${yq(n.sni)}`);
+    if (n.obfs) lines.push(`    obfs: ${yq(n.obfs)}`);
+    if (n.obfs_password) lines.push(`    obfs-password: ${yq(n.obfs_password)}`);
+  } else if (n.proto === 'socks5') {
+    lines.push(`    type: socks5`);
+    lines.push(`    server: ${yq(server)}`);
+    lines.push(`    port: ${n.port}`);
+    if (n.username) lines.push(`    username: ${yq(n.username)}`);
+    if (n.password) lines.push(`    password: ${yq(n.password)}`);
+    lines.push(`    udp: true`);
+  } else {
+    lines.push(`    type: ${n.proto}`);
+    lines.push(`    server: ${yq(server)}`);
+    lines.push(`    port: ${n.port}`);
+  }
+
+  if ((n.proto === 'vless' || n.proto === 'trojan') && n.tls) {
+    lines.push(`    servername: ${yq(sni)}`);
+    if (n.alpn && n.alpn.length) {
+      lines.push(`    alpn: [${n.alpn.map(a => yq(a)).join(', ')}]`);
+    }
+    lines.push(`    skip-cert-verify: false`);
+  }
+
+  if (n.network === 'ws' || n.network === 'xhttp' || (n.proto === 'vmess' && n.network === 'ws')) {
+    lines.push(`    network: ws`);
+    lines.push(`    ws-opts:`);
+    lines.push(`      path: ${yq(n.path || '/')}`);
+    lines.push(`      headers:`);
+    lines.push(`        Host: ${yq(host)}`);
+  } else if (n.network === 'grpc') {
+    lines.push(`    network: grpc`);
+    lines.push(`    grpc-opts:`);
+    lines.push(`      grpc-service-name: ${yq(n.path || '')}`);
+  }
+
+  return lines.join('\n');
+}
+
+// Generate Clash YAML (proxies section only for subscription use)
+function generateClashYaml(links) {
+  const nodes = links.map(parseProxyLink).filter(n => n !== null);
+  if (nodes.length === 0) return 'proxies: []';
+
+  const proxiesBlock = ['proxies:'];
+  for (const n of nodes) {
+    proxiesBlock.push(buildClashNodeLine(n));
+  }
+  return proxiesBlock.join('\n');
+}
+
+// Generate Surge INI ([Proxy] section only)
+function generateSurgeIni(links) {
+  const nodes = links.map(parseProxyLink).filter(n => n !== null);
+  const lines = ['[Proxy]'];
+  if (nodes.length === 0) {
+    lines.push('Direct = direct');
+    return lines.join('\n');
+  }
+  for (const n of nodes) {
+    if (n.proto === 'vless') {
+      const parts = [`${n.name} = vless`, `${n.server}`, `${n.port}`, `uuid=${n.uuid}`, `flow=${n.flow || 'none'}`, `tls=${n.tls ? 'true' : 'false'}`, `ws=true`, `ws-path=${n.path || '/'}`, `ws-host=${n.host || n.server}`];
+      if (n.tls) parts.push(`sni=${n.sni || n.host || n.server}`);
+      lines.push(parts.join(', '));
+    } else if (n.proto === 'trojan') {
+      lines.push(`${n.name} = trojan, ${n.server}, ${n.port}, password=${n.password}, sni=${n.sni || n.host || n.server}, ws=true, ws-path=${n.path || '/'}, ws-headers=Host:${n.host || n.server}, skip-cert-verify=false`);
+    } else if (n.proto === 'vmess') {
+      lines.push(`${n.name} = vmess, ${n.server}, ${n.port}, username=${n.uuid}, ws=true, ws-path=${n.path || '/'}, ws-headers=Host:${n.host || n.server}, over-tls=${n.tls ? 'true' : 'false'}`);
+    } else if (n.proto === 'ss') {
+      lines.push(`${n.name} = ss, ${n.server}, ${n.port}, encrypt-method=${n.method || 'aes-256-gcm'}, password=${n.password}`);
+    } else if (n.proto === 'ssr') {
+      lines.push(`${n.name} = ssr, ${n.server}, ${n.port}, protocol=${n.protocol || 'origin'}, protocol-param=, obfs=${n.obfs || 'plain'}, obfs-host=, encrypt-method=${n.method || 'aes-256-cfb'}, password=${n.password}`);
+    } else if (n.proto === 'socks5') {
+      lines.push(`${n.name} = socks5, ${n.server}, ${n.port}${n.username ? ', username=' + n.username : ''}${n.password ? ', password=' + n.password : ''}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+// ACL4SSR rule base URL (for Surge/Loon remote rules)
+const ACL_BASE = 'https://fastly.jsdelivr.net/gh/ACL4SSR/ACL4SSR@master/Clash';
+const aclRule = (name) => `${ACL_BASE}/${name}.list`;
+
+// Surge/Loon policy group list helper
+function iniPolicyList(names, opts = {}) {
+  const { directFirst = false, extraGroups = [], compact = false } = opts;
+  const sep = compact ? ',' : ', ';
+  const list = names.length ? names.join(sep) : 'DIRECT';
+  const parts = [];
+  if (directFirst) parts.push('🎯 全球直连', '🚀 节点选择');
+  else parts.push('🚀 节点选择', '🎯 全球直连');
+  parts.push(...extraGroups);
+  if (names.length) parts.push(list);
+  return parts.join(sep);
+}
+
+// Generate Loon config (full config with General/Proxy/Proxy Group/Remote Rule/Rule)
+function generateLoonIni(links) {
+  const nodes = links.map(parseProxyLink).filter(n => n !== null);
+  const names = nodes.map(n => n.name);
+  const lines = [
+    '[General]',
+    'ip-mode = dual',
+    'dns-server = 223.5.5.5,119.29.29.29,system',
+    'doh-server = https://223.5.5.5/dns-query, https://1.12.12.12/dns-query',
+    'allow-udp-proxy = true',
+    'allow-wifi-access = false',
+    'sni-sniffing = true',
+    'skip-proxy = 127.0.0.1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,localhost,*.local,captive.apple.com',
+    'bypass-tun = 10.0.0.0/8,100.64.0.0/10,127.0.0.0/8,169.254.0.0/16,172.16.0.0/12,192.0.0.0/24,192.0.2.0/24,192.88.99.0/24,192.168.0.0/16,198.51.100.0/24,203.0.113.0/24,224.0.0.0/4,255.255.255.255/32',
+    '',
+    '[Proxy]'
+  ];
+  for (const n of nodes) {
+    if (n.proto === 'vless') {
+      const parts = [`${n.name} = vless`, `${n.server}`, `${n.port}`, `udp=true`, `username=${n.uuid}`, `transport=${n.network || 'ws'}`, `path=${n.path || '/'}`, `host=${n.host || n.server}`, `over-tls=${n.tls ? 'true' : 'false'}`];
+      if (n.tls) {
+        parts.push(`tls-name=${n.sni || n.host || n.server}`);
+        if (n.alpn && n.alpn.length) parts.push(`alpn=${n.alpn.join(':')}`);
+        parts.push(`skip-cert-verify=false`);
+      }
+      lines.push(parts.join(','));
+    } else if (n.proto === 'trojan') {
+      const parts = [`${n.name} = trojan`, `${n.server}`, `${n.port}`, `password=${n.password}`, `transport=ws`, `path=${n.path || '/'}`, `host=${n.host || n.server}`, `over-tls=true`, `tls-name=${n.sni || n.host || n.server}`];
+      if (n.alpn && n.alpn.length) parts.push(`alpn=${n.alpn.join(':')}`);
+      parts.push(`skip-cert-verify=false`);
+      lines.push(parts.join(','));
+    } else if (n.proto === 'vmess') {
+      const parts = [`${n.name} = vmess`, `${n.server}`, `${n.port}`, `username=${n.uuid}`, `transport=${n.network || 'ws'}`, `path=${n.path || '/'}`, `host=${n.host || n.server}`, `over-tls=${n.tls ? 'true' : 'false'}`];
+      if (n.tls) {
+        parts.push(`tls-name=${n.sni || n.host || n.server}`);
+        if (n.alpn && n.alpn.length) parts.push(`alpn=${n.alpn.join(':')}`);
+        parts.push(`skip-cert-verify=false`);
+      }
+      lines.push(parts.join(','));
+    } else if (n.proto === 'ss') {
+      lines.push(`${n.name} = ss,${n.server},${n.port},encrypt-method=${n.method || 'aes-256-gcm'},password=${n.password}${n.plugin ? ',plugin=' + n.plugin : ''}`);
+    } else if (n.proto === 'ssr') {
+      lines.push(`${n.name} = ssr,${n.server},${n.port},protocol=${n.protocol || 'origin'},protocol-param=,obfs=${n.obfs || 'plain'},obfs-host=,encrypt-method=${n.method || 'aes-256-cfb'},password=${n.password}`);
+    } else if (n.proto === 'socks5') {
+      lines.push(`${n.name} = socks5,${n.server},${n.port}${n.username ? ',username=' + n.username : ''}${n.password ? ',password=' + n.password : ''}`);
+    }
+  }
+  lines.push('');
+  lines.push('[Proxy Group]');
+  const list = names.length ? names.join(',') : 'DIRECT';
+  lines.push(`🚀 节点选择 = select,🎯 全球直连,${list}`);
+  lines.push(`🌍 国外媒体 = select,${iniPolicyList(names, { compact: true })}`);
+  lines.push(`📺 哔哩哔哩 = select,${iniPolicyList(names, { directFirst: true, compact: true })}`);
+  lines.push(`📹 油管视频 = select,${iniPolicyList(names, { extraGroups: ['🌍 国外媒体'], compact: true })}`);
+  lines.push(`🎬 奈飞视频 = select,${iniPolicyList(names, { extraGroups: ['🌍 国外媒体'], compact: true })}`);
+  lines.push(`📲 电报信息 = select,${iniPolicyList(names, { compact: true })}`);
+  lines.push(`🌐 谷歌服务 = select,${iniPolicyList(names, { compact: true })}`);
+  lines.push(`🤖 OpenAI = select,${iniPolicyList(names, { compact: true })}`);
+  lines.push(`Ⓜ️ 微软服务 = select,${iniPolicyList(names, { directFirst: true, compact: true })}`);
+  lines.push(`🍎 苹果服务 = select,${iniPolicyList(names, { directFirst: true, compact: true })}`);
+  lines.push(`🎯 全球直连 = select,DIRECT`);
+  lines.push(`🛑 全球拦截 = select,REJECT,DIRECT`);
+  lines.push(`🐟 漏网之鱼 = select,${iniPolicyList(names, { compact: true })}`);
+  lines.push('');
+  lines.push('[Remote Rule]');
+  lines.push(`${aclRule('LocalAreaNetwork')}, policy=🎯 全球直连, tag=局域网, enabled=true`);
+  lines.push(`${aclRule('BanAD')}, policy=🛑 全球拦截, tag=广告拦截, enabled=true`);
+  lines.push(`${aclRule('BanProgramAD')}, policy=🛑 全球拦截, tag=应用广告, enabled=true`);
+  lines.push(`${aclRule('GoogleCN')}, policy=🎯 全球直连, tag=GoogleCN, enabled=true`);
+  lines.push(`${aclRule('SteamCN')}, policy=🎯 全球直连, tag=SteamCN, enabled=true`);
+  lines.push(`${aclRule('Microsoft')}, policy=Ⓜ️ 微软服务, tag=微软, enabled=true`);
+  lines.push(`${aclRule('Apple')}, policy=🍎 苹果服务, tag=苹果, enabled=true`);
+  lines.push(`${aclRule('Telegram')}, policy=📲 电报信息, tag=电报, enabled=true`);
+  lines.push(`${aclRule('OpenAi')}, policy=🤖 OpenAI, tag=OpenAI, enabled=true`);
+  lines.push(`${aclRule('Netflix')}, policy=🌍 国外媒体, tag=Netflix, enabled=true`);
+  lines.push(`${aclRule('YouTube')}, policy=🌍 国外媒体, tag=YouTube, enabled=true`);
+  lines.push(`${aclRule('Disney')}, policy=🌍 国外媒体, tag=Disney, enabled=true`);
+  lines.push(`${aclRule('Spotify')}, policy=🌍 国外媒体, tag=Spotify, enabled=true`);
+  lines.push(`${aclRule('TikTok')}, policy=🌍 国外媒体, tag=TikTok, enabled=true`);
+  lines.push(`${aclRule('BiliBili')}, policy=📺 哔哩哔哩, tag=哔哩哔哩, enabled=true`);
+  lines.push(`${aclRule('ProxyMedia')}, policy=🌍 国外媒体, tag=代理媒体, enabled=true`);
+  lines.push(`${aclRule('ProxyGFWlist')}, policy=🚀 节点选择, tag=代理列表, enabled=true`);
+  lines.push(`${aclRule('ChinaDomain')}, policy=🎯 全球直连, tag=中国域名, enabled=true`);
+  lines.push(`${aclRule('ChinaIp')}, policy=🎯 全球直连, tag=中国IP, enabled=true`);
+  lines.push('');
+  lines.push('[Rule]');
+  lines.push('GEOIP,CN,🎯 全球直连');
+  lines.push('FINAL,🐟 漏网之鱼');
+  return lines.join('\n');
+}
+
+// Generate Quantumult X config ([server_local] section only)
+function generateQuanxConf(links) {
+  const nodes = links.map(parseProxyLink).filter(n => n !== null);
+  const lines = ['[server_local]'];
+  if (nodes.length === 0) return lines.join('\n');
+  for (const n of nodes) {
+    if (n.proto === 'vless') {
+      const parts = [`${n.server}:${n.port}`, `method=none`, `password=${n.uuid}`, `obfs=${n.tls ? 'wss' : 'ws'}`, `obfs-host=${n.host || n.server}`, `obfs-uri=${n.path || '/'}`];
+      if (n.tls) parts.push(`tls-verification=true`, `tls13=true`);
+      parts.push(`tag=${n.name}`);
+      lines.push(`vless=${parts.join(', ')}`);
+    } else if (n.proto === 'trojan') {
+      const parts = [`${n.server}:${n.port}`, `password=${n.password}`, `over-tls=true`, `tls-host=${n.sni || n.host || n.server}`, `obfs=wss`, `obfs-host=${n.host || n.server}`, `obfs-uri=${n.path || '/'}`, `tls-verification=true`, `tag=${n.name}`];
+      lines.push(`trojan=${parts.join(', ')}`);
+    } else if (n.proto === 'vmess') {
+      const parts = [`${n.server}:${n.port}`, `method=${n.encryption || 'none'}`, `password=${n.uuid}`, `obfs=${n.tls ? 'wss' : 'ws'}`, `obfs-host=${n.host || n.server}`, `obfs-uri=${n.path || '/'}`];
+      if (n.tls) parts.push(`tls-verification=true`, `tls13=true`);
+      parts.push(`tag=${n.name}`);
+      lines.push(`vmess=${parts.join(', ')}`);
+    } else if (n.proto === 'ss') {
+      lines.push(`shadowsocks=${n.server}:${n.port}, method=${n.method || 'aes-256-gcm'}, password=${n.password}, tag=${n.name}`);
+    } else if (n.proto === 'ssr') {
+      lines.push(`shadowsocks=${n.server}:${n.port}, method=${n.method || 'aes-256-cfb'}, password=${n.password}, protocol=${n.protocol || 'origin'}, obfs=${n.obfs || 'plain'}, tag=${n.name}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+// Generate Sing-box JSON (outbounds only)
+function generateSingBoxJson(links) {
+  const nodes = links.map(parseProxyLink).filter(n => n !== null);
+  const outbounds = [];
+  for (const n of nodes) {
+    const out = { tag: n.name, server: normalizeServerHost(n.server), server_port: n.port };
+    if (n.proto === 'vless') {
+      out.type = 'vless';
+      out.uuid = n.uuid;
+      if (n.flow) out.flow = n.flow;
+    } else if (n.proto === 'trojan') {
+      out.type = 'trojan';
+      out.password = n.password;
+    } else if (n.proto === 'vmess') {
+      out.type = 'vmess';
+      out.uuid = n.uuid;
+      out.alter_id = n.aid || 0;
+      out.security = n.encryption || 'auto';
+    } else if (n.proto === 'ss') {
+      out.type = 'shadowsocks';
+      out.method = n.method || 'aes-256-gcm';
+      out.password = n.password;
+    } else if (n.proto === 'ssr') {
+      out.type = 'shadowsocksr';
+      out.method = n.method || 'aes-256-cfb';
+      out.password = n.password;
+    } else {
+      out.type = n.proto;
+    }
+
+    if ((n.proto === 'vless' || n.proto === 'trojan') && n.tls) {
+      out.tls = { enabled: true, server_name: n.sni || n.host || n.server, insecure: false };
+      if (n.fp) out.tls.utls = { enabled: true, fingerprint: n.fp };
+      if (n.alpn && n.alpn.length) out.tls.alpn = n.alpn;
+    }
+
+    if (n.network === 'ws' || (n.proto === 'vmess' && n.network === 'ws')) {
+      out.transport = { type: 'ws', path: n.path || '/', headers: { Host: n.host || n.server } };
+    } else if (n.network === 'grpc') {
+      out.transport = { type: 'grpc', service_name: n.path || '' };
+    }
+
+    outbounds.push(out);
+  }
+  return JSON.stringify(outbounds, null, 2);
+}
+
+// Generate Base64 encoded plain links
+function generateBase64(links) {
+  return utf8ToBase64(links.join('\n'));
+}
+
 // Process subscription and replace with local URLs
 async function processSubscription(request, url, backend) {
   const host = getHost(request);
@@ -412,6 +992,8 @@ async function processSubscription(request, url, backend) {
   const replacedURIs = [];
   // Accumulate replacements across all URL parts for later recovery
   const accumulatedReplacements = {};
+  // Collect all obfuscated proxy links for local format conversion
+  const allNodeLinks = [];
 
   for (const rawPart of urlParts) {
     const key = generateRandomStr(16);
@@ -454,6 +1036,8 @@ async function processSubscription(request, url, backend) {
           }
           // Merge per-part replacements into global accumulated set
           Object.assign(accumulatedReplacements, replacements);
+          // Collect obfuscated links for local format conversion
+          allNodeLinks.push(...out);
           obfuscatedData = (target === 'base64') ? utf8ToBase64(out.join('\r\n')) : out.join('\r\n');
         } else if (parsed.format === 'yaml') {
           obfuscatedData = replaceYAMLContent(content, accumulatedReplacements);
@@ -468,6 +1052,7 @@ async function processSubscription(request, url, backend) {
     } else if (/^(ssr?|vmess1?|trojan|vless|hysteria|hysteria2|tg):\/\//.test(rawPart) || rawPart.startsWith('socks://')) {
       memoryCacheSet(key, { content: rawPart });
       replacedURIs.push(`${host}/${subDir}/${key}`);
+      allNodeLinks.push(rawPart);
     }
   }
 
@@ -478,114 +1063,209 @@ async function processSubscription(request, url, backend) {
     });
   }
 
-  // If target exists: forward to backend for format conversion.
-  // First try with the original subscription URL (backend can reach most sources directly).
-  // If that fails, retry with internal cache URL for sources the backend cannot reach.
+  // If target exists: convert format.
+  // Primary path: local format conversion (no external dependency).
+  // Fallback: forward to external backend only when backend host differs from deployment.
   if (target) {
-    try {
-      const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
-      // Use targetUrl (from getFullUrl which handles long/tricky URLs) as original backend URL
-      const backendParams = new URLSearchParams(url.searchParams);
-      backendParams.set('url', targetUrl);
-      let backendUrl = `${backendBase}/sub?${backendParams.toString()}`;
+    // Check if BACKEND points to our own deployment (self-referencing)
+    const isSelfBackend = (() => {
+      try {
+        const backendHost = new URL(backend).host;
+        const requestHost = url.host;
+        return backendHost === requestHost;
+      } catch (e) { return false; }
+    })();
 
-      const fetchOptions = {
-        method: 'GET',
-        headers: {
-          'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0',
-          'Accept': 'text/plain,*/*'
-        },
-        signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(30000) : undefined
-      };
+    if (!isSelfBackend) {
+      // External backend and no local links → try backend forwarding
+      try {
+        const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
+        const backendParams = new URLSearchParams(url.searchParams);
+        backendParams.set('url', targetUrl);
+        let backendUrl = `${backendBase}/sub?${backendParams.toString()}`;
 
-      let response = await fetch(backendUrl, fetchOptions);
+        const fetchOptions = {
+          method: 'GET',
+          headers: {
+            'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0',
+            'Accept': 'text/plain,*/*'
+          },
+          signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(30000) : undefined
+        };
 
-      // If backend can't reach original source, retry with internal cache URL
-      if (!response.ok) {
-        const internalUrl = replacedURIs.join('|');
-        const internalParams = new URLSearchParams(url.searchParams);
-        internalParams.set('url', internalUrl);
-        backendUrl = `${backendBase}/sub?${internalParams.toString()}`;
-        response = await fetch(backendUrl, fetchOptions);
-      }
+        let response = await fetch(backendUrl, fetchOptions);
 
-      if (response.ok) {
-        let content = await response.text();
+        // If backend can't reach original source, retry with internal cache URL
+        if (!response.ok) {
+          const internalUrl = replacedURIs.join('|');
+          const internalParams = new URLSearchParams(url.searchParams);
+          internalParams.set('url', internalUrl);
+          backendUrl = `${backendBase}/sub?${internalParams.toString()}`;
+          response = await fetch(backendUrl, fetchOptions);
+        }
 
-        // Check for "no nodes found" in decoded content (same as _worker.js)
-        let parsedContext = null;
-        try { parsedContext = parseData(content); } catch (e) {}
-        const testContent = parsedContext && parsedContext.format === 'base64' ? parsedContext.data : content;
-        const backendIndicatesNoNodes = testContent.length < 200 && /no nodes were found|no valid nodes found/i.test(testContent);
-        if (!backendIndicatesNoNodes) {
-          // Dynamically replace backend domains and handle Base64
-          try {
-            const backendHost = new URL(backend).host;
-            const backendRegex = new RegExp(escapeRegExp(backendHost), 'g');
-            const replaceDomains = (str) => {
-              return str
-                .replace(/https:\/\/bulianglin2023\.dev/g, host)
-                .replace(/bulianglin2023\.dev/g, url.host)
-                .replace(new RegExp(`https://${escapeRegExp(backendHost)}`, 'g'), host)
-                .replace(backendRegex, url.host)
-                .replace(/http:\/\/127\.0\.0\.1:25500/g, host)
-                .replace(/127\.0\.0\.1:25500/g, url.host);
-            };
+        if (response.ok) {
+          let content = await response.text();
 
-            const parsedCtx = parseData(content);
-            if (parsedCtx.format === 'base64') {
-              const replaced = replaceDomains(parsedCtx.data);
-              content = (target === 'base64') ? utf8ToBase64(replaced) : replaced;
-            } else {
-              content = replaceDomains(content);
-            }
-          } catch (e) {
-            console.error('Domain replace error:', e);
-          }
-
-          // Recovery: restore original server/uuid/etc from obfuscated data
-          if (Object.keys(accumulatedReplacements).length > 0) {
+          let parsedContext = null;
+          try { parsedContext = parseData(content); } catch (e) {}
+          const testContent = parsedContext && parsedContext.format === 'base64' ? parsedContext.data : content;
+          const backendIndicatesNoNodes = testContent.length < 200 && /no nodes were found|no valid nodes found/i.test(testContent);
+          if (!backendIndicatesNoNodes) {
             try {
-              const recoveryRegex = new RegExp(Object.keys(accumulatedReplacements).map(escapeRegExp).join("|"), "g");
-              try {
-                const decoded = base64ToUtf8Safe(content);
-                if (decoded && (decoded.includes("://") || decoded.includes("proxies:") || decoded.includes("port:"))) {
-                  content = decoded.replace(recoveryRegex, (m) => accumulatedReplacements[m] || m);
-                  if (target === "base64") content = utf8ToBase64(content);
-                } else {
-                  content = content.replace(recoveryRegex, (m) => accumulatedReplacements[m] || m);
-                }
-              } catch (e) {
-                content = content.replace(recoveryRegex, (m) => accumulatedReplacements[m] || m);
+              const backendHost = new URL(backend).host;
+              const backendRegex = new RegExp(escapeRegExp(backendHost), 'g');
+              const replaceDomains = (str) => {
+                return str
+                  .replace(/https:\/\/bulianglin2023\.dev/g, host)
+                  .replace(/bulianglin2023\.dev/g, url.host)
+                  .replace(new RegExp(`https://${escapeRegExp(backendHost)}`, 'g'), host)
+                  .replace(backendRegex, url.host)
+                  .replace(/http:\/\/127\.0\.0\.1:25500/g, host)
+                  .replace(/127\.0\.0\.1:25500/g, url.host);
+              };
+
+              const parsedCtx = parseData(content);
+              if (parsedCtx.format === 'base64') {
+                const replaced = replaceDomains(parsedCtx.data);
+                content = (target === 'base64') ? utf8ToBase64(replaced) : replaced;
+              } else {
+                content = replaceDomains(content);
               }
             } catch (e) {
-              // Recovery error is non-fatal; return content as-is
+              console.error('Domain replace error:', e);
             }
-          }
 
-          // Clean up memoryCache
-          for (const uri of replacedURIs) {
-            const ck = uri.split('internal/')[1];
-            memoryCacheDelete(ck);
-          }
-
-          return new Response(content, {
-            status: 200,
-            headers: {
-              'Content-Type': response.headers.get('Content-Type') || 'text/plain',
-              'Access-Control-Allow-Origin': '*'
+            if (Object.keys(accumulatedReplacements).length > 0) {
+              try {
+                const recoveryRegex = new RegExp(Object.keys(accumulatedReplacements).map(escapeRegExp).join("|"), "g");
+                try {
+                  const decoded = base64ToUtf8Safe(content);
+                  if (decoded && (decoded.includes("://") || decoded.includes("proxies:") || decoded.includes("port:"))) {
+                    content = decoded.replace(recoveryRegex, (m) => accumulatedReplacements[m] || m);
+                    if (target === "base64") content = utf8ToBase64(content);
+                  } else {
+                    content = content.replace(recoveryRegex, (m) => accumulatedReplacements[m] || m);
+                  }
+                } catch (e) {
+                  content = content.replace(recoveryRegex, (m) => accumulatedReplacements[m] || m);
+                }
+              } catch (e) {}
             }
-          });
+
+            for (const uri of replacedURIs) {
+              const ck = uri.split('internal/')[1];
+              memoryCacheDelete(ck);
+            }
+
+            return new Response(content, {
+              status: 200,
+              headers: {
+                'Content-Type': response.headers.get('Content-Type') || 'text/plain',
+                'Access-Control-Allow-Origin': '*'
+              }
+            });
+          }
         }
+      } catch (e) {
+        console.error('Backend conversion error:', e && e.message ? e.message : String(e));
       }
-      // Backend not ok or no nodes found → fall through to assemble from local cache
-    } catch (e) {
-      console.error('Backend conversion error, falling back to local data:', e && e.message ? e.message : String(e));
-      // Fall through to assemble from local cache
+    }
+
+    // Local format conversion (primary path for self-backend, fallback for external backend)
+    if (allNodeLinks.length > 0) {
+      try {
+        // Step 1: generate formatted output from obfuscated links
+        // (parseProxyLink inside each generator handles Base64 decoding correctly)
+        let localContent;
+        let contentType = 'text/plain; charset=utf-8';
+
+        switch (target.toLowerCase()) {
+          case 'clash':
+          case 'clashr':
+          case 'stash':
+          case 'meta':
+          case 'clashmeta':
+            localContent = generateClashYaml(allNodeLinks);
+            contentType = 'text/yaml; charset=utf-8';
+            break;
+          case 'surge':
+          case 'surge2':
+          case 'surge3':
+          case 'surge4':
+            localContent = generateSurgeIni(allNodeLinks);
+            contentType = 'text/plain; charset=utf-8';
+            break;
+          case 'loon':
+            localContent = generateLoonIni(allNodeLinks);
+            contentType = 'text/plain; charset=utf-8';
+            break;
+          case 'quantumult':
+            // Old Quantumult format → Base64 encoded list
+            localContent = generateBase64(allNodeLinks);
+            break;
+          case 'quanx':
+          case 'quantumultx':
+            localContent = generateQuanxConf(allNodeLinks);
+            contentType = 'text/plain; charset=utf-8';
+            break;
+          case 'singbox':
+          case 'sing-box':
+            localContent = generateSingBoxJson(allNodeLinks);
+            contentType = 'application/json; charset=utf-8';
+            break;
+          case 'ss':
+          case 'ssr':
+          case 'v2ray':
+            localContent = generateBase64(allNodeLinks);
+            break;
+          default:
+            localContent = generateBase64(allNodeLinks);
+        }
+
+        // Step 2: recover original server/uuid/password from generated output
+        // (values appear as plain text in the generated format, so text-level replace works)
+        if (Object.keys(accumulatedReplacements).length > 0) {
+          const recoveryRegex = new RegExp(
+            Object.keys(accumulatedReplacements).map(escapeRegExp).join("|"), "g"
+          );
+          if (target.toLowerCase() === 'base64' || target.toLowerCase() === 'ss' || target.toLowerCase() === 'ssr' || target.toLowerCase() === 'v2ray') {
+            // Base64 output → decode, recover, re-encode
+            try {
+              const decoded = base64ToUtf8Safe(localContent);
+              if (decoded && (decoded.includes("://") || decoded.includes("proxies:"))) {
+                localContent = utf8ToBase64(
+                  decoded.replace(recoveryRegex, (m) => accumulatedReplacements[m] || m)
+                );
+              }
+            } catch (e) {}
+          } else {
+            // Plain text output (Clash YAML, Surge INI, QuanX, Sing-box JSON)
+            localContent = localContent.replace(recoveryRegex, (m) => accumulatedReplacements[m] || m);
+          }
+        }
+
+        // Clean up memoryCache
+        for (const uri of replacedURIs) {
+          const ck = uri.split('internal/')[1];
+          memoryCacheDelete(ck);
+        }
+
+        return new Response(localContent, {
+          status: 200,
+          headers: {
+            'Content-Type': contentType,
+            'Access-Control-Allow-Origin': '*'
+          }
+        });
+      } catch (e) {
+        console.error('Local format conversion error:', e && e.message ? e.message : String(e));
+        // Fall through to assemble from local cache
+      }
     }
   }
 
-  // No target OR backend failed → assemble from local cache
+  // No target OR conversion failed → assemble from local cache as plain text
   const assembled = [];
   const keysToDelete = [];
   for (const k of replacedURIs) {
