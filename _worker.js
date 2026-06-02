@@ -118,15 +118,6 @@ function normalizeServer(server) {
   return server;
 }
 
-// Helper: return first non-empty string from arguments
-function firstNonEmpty() {
-  for (let i = 0; i < arguments.length; i++) {
-    const v = arguments[i];
-    if (typeof v === 'string' && v.length > 0) return v;
-  }
-  return null;
-}
-
 // --- Obfuscation helpers (ss, ssr, vmess, trojan/vless, hysteria, socks) ---
 function replaceInUri(link, replacements, isRecovery) {
   if (link.startsWith("ss://")) return replaceSS(link, replacements, isRecovery);
@@ -141,7 +132,7 @@ function replaceInUri(link, replacements, isRecovery) {
 
 function replaceSS(link, replacements, isRecovery) {
   const randomPassword = generateRandomStr(12);
-  const randomDomain = randomPassword + ".com";
+  const randomDomain = generateRandomStr(16) + ".com";
   let tempLink = link.slice(5).split("#")[0];
   if (tempLink.includes("@")) {
     const match = tempLink.match(/(\S+?)@((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\d.]+)|(?:[\w\.-]+)):/);
@@ -212,10 +203,6 @@ function replaceSSR(link, replacements, isRecovery) {
     if (!match) return link;
     const serverRaw = match[1];
     const server = normalizeServer(serverRaw);
-    const port = match[2];
-    const proto = match[3];
-    const method = match[4];
-    const obfs = match[5];
     const passwordEncoded = match[6];
 
     if (isRecovery) {
@@ -481,6 +468,7 @@ async function processSubscription(request, urlObj, backend, env) {
     let content = await response.text();
     
     // Replace backend domains with current host dynamically
+    let parsedContext = null;
     try {
       const backendHost = new URL(backend).host;
       const backendRegex = new RegExp(escapeRegExp(backendHost), 'g');
@@ -494,7 +482,7 @@ async function processSubscription(request, urlObj, backend, env) {
           .replace(/127\.0\.0\.1:25500/g, urlObj.host);
       };
       
-      const parsedContext = parseData(content);
+      parsedContext = parseData(content);
       if (parsedContext.format === 'base64') {
         const replaced = replaceDomains(parsedContext.data);
         content = utf8ToBase64(replaced);
@@ -505,7 +493,9 @@ async function processSubscription(request, urlObj, backend, env) {
       console.error('Domain replace error:', e);
     }
 
-    const backendIndicatesNoNodes = /no nodes were found|no valid nodes found|not found/i.test(content);
+    // Test for backend error in decoded content (not base64-encoded content)
+    const testContent = parsedContext && parsedContext.format === 'base64' ? parsedContext.data : content;
+    const backendIndicatesNoNodes = /no nodes were found|no valid nodes found|not found/i.test(testContent);
     if (!response.ok || backendIndicatesNoNodes) {
       const assembled = [];
       let lastYieldTime = Date.now();

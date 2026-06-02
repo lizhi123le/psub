@@ -42,12 +42,12 @@ function memoryCacheDelete(key) {
 // UTF-8 <-> Base64 helpers (standard base64, compatible with base64ToUtf8Safe)
 function utf8ToBase64(str) {
   try {
-    return btoa(unescape(encodeURIComponent(str)));
+    return btoa(unescape(encodeURIComponent(str))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   } catch (e) {
     const bytes = new TextEncoder().encode(str);
     let binary = '';
     for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-    return btoa(binary);
+    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   }
 }
 
@@ -190,7 +190,7 @@ function replaceInUri(link, replacements, isRecovery) {
 
 function _replaceSS(link, replacements, isRecovery) {
   const randomPassword = generateRandomStr(12);
-  const randomDomain = randomPassword + ".com";
+  const randomDomain = generateRandomStr(16) + ".com";
   let tempLink = link.slice(5).split("#")[0];
   if (tempLink.includes("@")) {
     const match = tempLink.match(/(\S+?)@((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\d.]+)|(?:[\w\.-]+)):/);
@@ -263,14 +263,10 @@ function _replaceSSR(link, replacements, isRecovery) {
     if (!match) return link;
     const serverRaw = match[1];
     let server = normalizeServer(serverRaw);
-    const port = match[2];
-    const proto = match[3];
-    const method = match[4];
-    const obfs = match[5];
     const passwordEncoded = match[6];
 
     if (isRecovery) {
-      const originalServer = replacements && (replacements[serverRaw] || replacements[server]);
+      const originalServer = replacements && replacements[server];
       const originalPass = passwordEncoded ? base64ToUtf8Safe(passwordEncoded) : null;
       if (!originalServer || !originalPass) return link;
       const recovered = decoded.replace(serverRaw, originalServer).replace(passwordEncoded, utf8ToBase64(originalPass));
@@ -279,7 +275,7 @@ function _replaceSSR(link, replacements, isRecovery) {
       const randomDomain = generateRandomStr(12) + ".com";
       const randomPass = generateRandomStr(12);
       if (replacements) {
-        replacements[randomDomain] = serverRaw;
+        replacements[randomDomain] = server;
         replacements[randomPass] = passwordEncoded;
       }
       const replaced = decoded.replace(serverRaw, randomDomain).replace(passwordEncoded, utf8ToBase64(randomPass));
@@ -332,7 +328,7 @@ function replaceHysteria(link, replacements, isRecovery) {
     return original ? link.replace(rawHost, original) : link;
   } else {
     const randomDomain = generateRandomStr(12) + ".com";
-    if (replacements) replacements[randomDomain] = rawHost;
+    if (replacements) replacements[randomDomain] = server;
     return link.replace(rawHost, randomDomain);
   }
 }
@@ -352,7 +348,7 @@ function replaceHysteria2(link, replacements, isRecovery) {
     const randomDomain = generateRandomStr(10) + ".com";
     const randomUUID = generateRandomUUID();
     if (replacements) {
-      replacements[randomDomain] = rawHost;
+      replacements[randomDomain] = server;
       replacements[randomUUID] = uuid;
     }
     return link.replace(uuid, randomUUID).replace(rawHost, randomDomain);
@@ -488,7 +484,7 @@ async function processSubscription(request, url, backend) {
             const nl = replaceInUri(line, replacements, false);
             out.push(nl || line);
           }
-          obfuscatedData = out.join('\r\n');
+          obfuscatedData = utf8ToBase64(out.join('\r\n'));
         } catch (e) {
           obfuscatedData = content;
         }
@@ -556,7 +552,7 @@ async function processSubscription(request, url, backend) {
             const nl = replaceInUri(link, replacements, false);
             out.push(nl || link);
           }
-          obfuscatedData = out.join('\r\n');
+          obfuscatedData = utf8ToBase64(out.join('\r\n'));
         } else if (parsed.format === 'yaml') {
           obfuscatedData = replaceYAMLContent(content, {});
         }
