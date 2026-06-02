@@ -463,7 +463,7 @@ async function processSubscription(request, url, backend) {
         const parsedContext = parseData(content);
         if (parsedContext.format === 'base64') {
           const replaced = replaceDomains(parsedContext.data);
-          content = utf8ToBase64(replaced);
+          content = (target === 'base64') ? utf8ToBase64(replaced) : replaced;
         } else {
           content = replaceDomains(content);
         }
@@ -476,7 +476,7 @@ async function processSubscription(request, url, backend) {
 
       if (parsed.format === 'yaml') {
         obfuscatedData = replaceYAMLContent(content, replacements);
-      } else if (parsed.format === 'base64') {
+        } else if (parsed.format === 'base64') {
         try {
           const lines = parsed.data.split(/\r?\n/).filter(l => l.trim());
           const out = [];
@@ -484,7 +484,7 @@ async function processSubscription(request, url, backend) {
             const nl = replaceInUri(line, replacements, false);
             out.push(nl || line);
           }
-          obfuscatedData = utf8ToBase64(out.join('\r\n'));
+          obfuscatedData = (target === 'base64') ? utf8ToBase64(out.join('\r\n')) : out.join('\r\n');
         } catch (e) {
           obfuscatedData = content;
         }
