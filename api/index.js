@@ -500,25 +500,37 @@ async function processSubscription(request, url, backend) {
     });
   }
 
-  // If target exists: forward internal cache URL to backend for format conversion.
-  // Backend fetches cached content from /internal/ instead of the original subscription source
-  // (same as _worker.js approach). Falls back to local cache if backend fails.
+  // If target exists: forward to backend for format conversion.
+  // First try with the original subscription URL (backend can reach most sources directly).
+  // If that fails, retry with internal cache URL for sources the backend cannot reach.
   if (target) {
     try {
       const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
-      // Forward internal cache URL to backend (so backend fetches from our local cache, not original source)
-      const internalUrl = replacedURIs.join('|');
+      const originalUrl = url.searchParams.get('url') || targetUrl;
+      // Build backend URL with original subscription URL
       const backendParams = new URLSearchParams(url.searchParams);
-      backendParams.set('url', internalUrl);
-      const backendUrl = `${backendBase}/sub?${backendParams.toString()}`;
-      const response = await fetch(backendUrl, {
+      backendParams.set('url', originalUrl);
+      let backendUrl = `${backendBase}/sub?${backendParams.toString()}`;
+
+      const fetchOptions = {
         method: 'GET',
         headers: {
           'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0',
           'Accept': 'text/plain,*/*'
         },
         signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(30000) : undefined
-      });
+      };
+
+      let response = await fetch(backendUrl, fetchOptions);
+
+      // If backend can't reach original source, retry with internal cache URL
+      if (!response.ok) {
+        const internalUrl = replacedURIs.join('|');
+        const internalParams = new URLSearchParams(url.searchParams);
+        internalParams.set('url', internalUrl);
+        backendUrl = `${backendBase}/sub?${internalParams.toString()}`;
+        response = await fetch(backendUrl, fetchOptions);
+      }
 
       if (response.ok) {
         let content = await response.text();
