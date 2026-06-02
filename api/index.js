@@ -500,13 +500,17 @@ async function processSubscription(request, url, backend) {
     });
   }
 
-  // If target exists: forward the ORIGINAL subscription URL to backend for format conversion.
-  // If backend fails (e.g., cannot reach the subscription source), fall back to local cache.
+  // If target exists: forward internal cache URL to backend for format conversion.
+  // Backend fetches cached content from /internal/ instead of the original subscription source
+  // (same as _worker.js approach). Falls back to local cache if backend fails.
   if (target) {
     try {
       const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
-      // Forward original request URL to backend (with original subscription URL + target param)
-      const backendUrl = `${backendBase}${url.pathname}${url.search}`;
+      // Forward internal cache URL to backend (so backend fetches from our local cache, not original source)
+      const internalUrl = replacedURIs.join('|');
+      const backendParams = new URLSearchParams(url.searchParams);
+      backendParams.set('url', internalUrl);
+      const backendUrl = `${backendBase}/sub?${backendParams.toString()}`;
       const response = await fetch(backendUrl, {
         method: 'GET',
         headers: {
@@ -693,6 +697,20 @@ export default async function handler(request) {
     } catch (e) {
       console.error('Version fetch error:', e);
     }
+  }
+
+  // Internal cache endpoint - serves cached obfuscated content for backend conversion
+  if (url.pathname.startsWith('/internal/')) {
+    const key = url.pathname.split('/internal/').pop() || '';
+    if (key) {
+      const value = memoryCache.get(key);
+      if (value && value.content) {
+        return new Response(value.content, {
+          headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Access-Control-Allow-Origin': '*' }
+        });
+      }
+    }
+    return new Response('Not found', { status: 404 });
   }
 
   // Subscription conversion endpoint
