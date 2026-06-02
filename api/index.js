@@ -262,12 +262,12 @@ function _replaceSSR(link, replacements, isRecovery) {
     const match = decoded.match(/((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\w\.-]+)):(\d+?):(\S+?):(\S+?):(\S+?):(\S+)\//);
     if (!match) return link;
     const serverRaw = match[1];
-    let server = normalizeServer(serverRaw);
+    const server = normalizeServer(serverRaw);
     const passwordEncoded = match[6];
 
     if (isRecovery) {
       const originalServer = replacements && replacements[server];
-      const originalPass = passwordEncoded ? base64ToUtf8Safe(passwordEncoded) : null;
+      const originalPass = replacements && replacements[base64ToUtf8Safe(passwordEncoded)];
       if (!originalServer || !originalPass) return link;
       const recovered = decoded.replace(serverRaw, originalServer).replace(passwordEncoded, utf8ToBase64(originalPass));
       return "ssr://" + utf8ToBase64(recovered);
@@ -276,7 +276,7 @@ function _replaceSSR(link, replacements, isRecovery) {
       const randomPass = generateRandomStr(12);
       if (replacements) {
         replacements[randomDomain] = server;
-        replacements[randomPass] = passwordEncoded;
+        replacements[randomPass] = base64ToUtf8Safe(passwordEncoded);
       }
       const replaced = decoded.replace(serverRaw, randomDomain).replace(passwordEncoded, utf8ToBase64(randomPass));
       return "ssr://" + utf8ToBase64(replaced);
@@ -301,7 +301,8 @@ function replaceSocks(link, replacements, isRecovery) {
       const serverMatch = serverPort.match(/^(((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\d.]+)|(?:[\w\.-]+))):(\d+)$/);
       if (!serverMatch) return link;
       const serverRaw = serverMatch[1];
-      if (replacements) replacements[fakeIP] = serverRaw;
+      const server = normalizeServer(serverRaw);
+      if (replacements) replacements[fakeIP] = server;
       const randomPass = generateRandomStr(12);
       const port = serverMatch[3];
       if (pass && replacements) replacements[randomPass] = pass;
@@ -310,7 +311,8 @@ function replaceSocks(link, replacements, isRecovery) {
       const serverMatch = temp.match(/^(((?:\[[\da-fA-F:]+\])|(?:[\d\-\w\.]+))):(\d+)$/);
       if (!serverMatch) return link;
       const serverRaw = serverMatch[1];
-      if (replacements) replacements[fakeIP] = serverRaw;
+      const server = normalizeServer(serverRaw);
+      if (replacements) replacements[fakeIP] = server;
       return `socks://${fakeIP}:${serverMatch[3]}${hashPart}`;
     }
   } catch (e) { return link; }
@@ -476,7 +478,7 @@ async function processSubscription(request, url, backend) {
 
       if (parsed.format === 'yaml') {
         obfuscatedData = replaceYAMLContent(content, replacements);
-        } else if (parsed.format === 'base64') {
+      } else if (parsed.format === 'base64') {
         try {
           const lines = parsed.data.split(/\r?\n/).filter(l => l.trim());
           const out = [];
@@ -494,7 +496,7 @@ async function processSubscription(request, url, backend) {
       memoryCacheSet(key, { content: obfuscatedData || content, headers: Object.fromEntries(response.headers) });
       replacedURIs.push(`${subDir}/${key}`);
 
-      return new Response(content, {
+      return new Response(obfuscatedData || content, {
         status: 200,
         headers: {
           'Content-Type': response.headers.get('Content-Type') || 'text/plain',
