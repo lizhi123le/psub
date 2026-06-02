@@ -552,7 +552,7 @@ async function processSubscription(request, url, backend) {
             const nl = replaceInUri(link, replacements, false);
             out.push(nl || link);
           }
-          obfuscatedData = utf8ToBase64(out.join('\r\n'));
+          obfuscatedData = (target === 'base64') ? utf8ToBase64(out.join('\r\n')) : out.join('\r\n');
         } else if (parsed.format === 'yaml') {
           obfuscatedData = replaceYAMLContent(content, {});
         }
