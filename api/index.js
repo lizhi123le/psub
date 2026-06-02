@@ -1041,6 +1041,31 @@ async function processSubscription(request, url, backend) {
           obfuscatedData = (target === 'base64') ? utf8ToBase64(out.join('\r\n')) : out.join('\r\n');
         } else if (parsed.format === 'yaml') {
           obfuscatedData = replaceYAMLContent(content, accumulatedReplacements);
+        } else {
+          // Unknown format - check if content is plain text proxy links
+          const lines = content.split(/\r?\n/).filter(l => l.trim());
+          const proxyLinks = [];
+          const nonProxyLines = [];
+          const proxyPattern = /^(ssr?|vmess|trojan|vless|hysteria|hysteria2|hy|socks5?):\/\//i;
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (proxyPattern.test(trimmed)) {
+              proxyLinks.push(trimmed);
+            } else {
+              nonProxyLines.push(line);
+            }
+          }
+          if (proxyLinks.length > 0) {
+            const replacements = {};
+            const out = [];
+            for (const link of proxyLinks) {
+              const nl = replaceInUri(link, replacements, false);
+              out.push(nl || link);
+            }
+            Object.assign(accumulatedReplacements, replacements);
+            allNodeLinks.push(...out);
+            obfuscatedData = [...out, ...nonProxyLines].join('\r\n');
+          }
         }
 
         memoryCacheSet(key, { content: obfuscatedData });
@@ -1049,7 +1074,7 @@ async function processSubscription(request, url, backend) {
         console.error('Fetch error:', e && e.message ? e.message : String(e));
         continue;
       }
-    } else if (/^(ssr?|vmess1?|trojan|vless|hysteria|hysteria2|tg):\/\//.test(rawPart) || rawPart.startsWith('socks://')) {
+    } else if (/^(ssr?|vmess|trojan|vless|hysteria|hysteria2|hy|socks5?):\/\//i.test(rawPart)) {
       memoryCacheSet(key, { content: rawPart });
       replacedURIs.push(`${host}/${subDir}/${key}`);
       allNodeLinks.push(rawPart);
