@@ -421,99 +421,19 @@ async function processSubscription(request, url, backend) {
     }
   }
 
-  // Make replacedURIs available to all branches
-  const replacedURIs = [];
-
-  // IMPORTANT: replacements maps are local-only and never sent to backend.
-  // They are short-lived and not logged.
-
-  // If there's a target parameter (like 'clash'), forward to backend for conversion first
-  if (target) {
-    const replacements = {};
-    try {
-      const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
-      const backendUrl = `${backendBase}${url.pathname}${url.search}`;
-      const response = await fetch(backendUrl, {
-        method: 'GET',
-        headers: {
-          'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0',
-          'Accept': 'text/plain,*/*'
-        },
-        signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(30000) : undefined
-      });
-
-      if (!response.ok) {
-        return new Response(`Backend error: ${response.status}`, { status: response.status });
-      }
-
-      let content = await response.text();
-
-      // Dynamically replace backend domains and handle Base64
-      try {
-        const backendHost = new URL(backend).host;
-        const backendRegex = new RegExp(escapeRegExp(backendHost), 'g');
-        const replaceDomains = (str) => {
-          return str
-            .replace(/https:\/\/bulianglin2023\.dev/g, host)
-            .replace(/bulianglin2023\.dev/g, url.host)
-            .replace(new RegExp(`https://${escapeRegExp(backendHost)}`, 'g'), host)
-            .replace(backendRegex, url.host)
-            .replace(/http:\/\/127\.0\.0\.1:25500/g, host)
-            .replace(/127\.0\.0\.1:25500/g, url.host);
-        };
-        
-        const parsedContext = parseData(content);
-        if (parsedContext.format === 'base64') {
-          const replaced = replaceDomains(parsedContext.data);
-          content = (target === 'base64') ? utf8ToBase64(replaced) : replaced;
-        } else {
-          content = replaceDomains(content);
-        }
-      } catch (e) {
-        console.error('Domain replace error:', e);
-      }
-
-      const parsed = parseData(content);
-      let obfuscatedData = content;
-
-      if (parsed.format === 'yaml') {
-        obfuscatedData = replaceYAMLContent(content, replacements);
-      } else if (parsed.format === 'base64') {
-        try {
-          const lines = parsed.data.split(/\r?\n/).filter(l => l.trim());
-          const out = [];
-          for (const line of lines) {
-            const nl = replaceInUri(line, replacements, false);
-            out.push(nl || line);
-          }
-          obfuscatedData = (target === 'base64') ? utf8ToBase64(out.join('\r\n')) : out.join('\r\n');
-        } catch (e) {
-          obfuscatedData = content;
-        }
-      }
-
-      const key = generateRandomStr(20);
-      memoryCacheSet(key, { content: obfuscatedData || content, headers: Object.fromEntries(response.headers) });
-      replacedURIs.push(`${subDir}/${key}`);
-
-      return new Response(obfuscatedData || content, {
-        status: 200,
-        headers: {
-          'Content-Type': response.headers.get('Content-Type') || 'text/plain',
-          'Access-Control-Allow-Origin': '*'
-        }
-      });
-    } catch (e) {
-      return new Response(`Error forwarding to backend: ${e && e.message ? e.message : String(e)}`, { status: 500 });
-    }
-  }
-
   // Parse the subscription URL
   const urlParts = targetUrl.split('|').filter(p => p.trim() !== '');
 
   if (urlParts.length === 0) {
     return new Response('There are no valid links', { status: 400 });
   }
+
+  // IMPORTANT: Always fetch subscription content directly first,
+  // then optionally forward local cache URLs to backend for conversion.
+  // This ensures fallback data is available when backend cannot reach certain URLs.
+  const replacedURIs = [];
+  // Accumulate replacements across all URL parts for later recovery
+  const accumulatedReplacements = {};
 
   for (const rawPart of urlParts) {
     const key = generateRandomStr(16);
@@ -554,9 +474,11 @@ async function processSubscription(request, url, backend) {
             const nl = replaceInUri(link, replacements, false);
             out.push(nl || link);
           }
+          // Merge per-part replacements into global accumulated set
+          Object.assign(accumulatedReplacements, replacements);
           obfuscatedData = (target === 'base64') ? utf8ToBase64(out.join('\r\n')) : out.join('\r\n');
         } else if (parsed.format === 'yaml') {
-          obfuscatedData = replaceYAMLContent(content, {});
+          obfuscatedData = replaceYAMLContent(content, accumulatedReplacements);
         }
 
         memoryCacheSet(key, { content: obfuscatedData });
@@ -578,9 +500,101 @@ async function processSubscription(request, url, backend) {
     });
   }
 
-  // Collect all cached content for final response
+  // If target exists: forward the ORIGINAL subscription URL to backend for format conversion.
+  // If backend fails (e.g., cannot reach the subscription source), fall back to local cache.
+  if (target) {
+    try {
+      const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
+      // Forward original request URL to backend (with original subscription URL + target param)
+      const backendUrl = `${backendBase}${url.pathname}${url.search}`;
+      const response = await fetch(backendUrl, {
+        method: 'GET',
+        headers: {
+          'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0',
+          'Accept': 'text/plain,*/*'
+        },
+        signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(30000) : undefined
+      });
+
+      if (response.ok) {
+        let content = await response.text();
+
+        // Check for "no nodes found" in decoded content (same as _worker.js)
+        let parsedContext = null;
+        try { parsedContext = parseData(content); } catch (e) {}
+        const testContent = parsedContext && parsedContext.format === 'base64' ? parsedContext.data : content;
+        const backendIndicatesNoNodes = /no nodes were found|no valid nodes found|not found/i.test(testContent);
+        if (!backendIndicatesNoNodes) {
+          // Dynamically replace backend domains and handle Base64
+          try {
+            const backendHost = new URL(backend).host;
+            const backendRegex = new RegExp(escapeRegExp(backendHost), 'g');
+            const replaceDomains = (str) => {
+              return str
+                .replace(/https:\/\/bulianglin2023\.dev/g, host)
+                .replace(/bulianglin2023\.dev/g, url.host)
+                .replace(new RegExp(`https://${escapeRegExp(backendHost)}`, 'g'), host)
+                .replace(backendRegex, url.host)
+                .replace(/http:\/\/127\.0\.0\.1:25500/g, host)
+                .replace(/127\.0\.0\.1:25500/g, url.host);
+            };
+
+            const parsedCtx = parseData(content);
+            if (parsedCtx.format === 'base64') {
+              const replaced = replaceDomains(parsedCtx.data);
+              content = (target === 'base64') ? utf8ToBase64(replaced) : replaced;
+            } else {
+              content = replaceDomains(content);
+            }
+          } catch (e) {
+            console.error('Domain replace error:', e);
+          }
+
+          // Recovery: restore original server/uuid/etc from obfuscated data
+          if (Object.keys(accumulatedReplacements).length > 0) {
+            try {
+              const recoveryRegex = new RegExp(Object.keys(accumulatedReplacements).map(escapeRegExp).join("|"), "g");
+              try {
+                const decoded = base64ToUtf8Safe(content);
+                if (decoded && (decoded.includes("://") || decoded.includes("proxies:") || decoded.includes("port:"))) {
+                  content = decoded.replace(recoveryRegex, (m) => accumulatedReplacements[m] || m);
+                  if (target === "base64") content = utf8ToBase64(content);
+                } else {
+                  content = content.replace(recoveryRegex, (m) => accumulatedReplacements[m] || m);
+                }
+              } catch (e) {
+                content = content.replace(recoveryRegex, (m) => accumulatedReplacements[m] || m);
+              }
+            } catch (e) {
+              // Recovery error is non-fatal; return content as-is
+            }
+          }
+
+          // Clean up memoryCache
+          for (const uri of replacedURIs) {
+            const ck = uri.split('internal/')[1];
+            memoryCacheDelete(ck);
+          }
+
+          return new Response(content, {
+            status: 200,
+            headers: {
+              'Content-Type': response.headers.get('Content-Type') || 'text/plain',
+              'Access-Control-Allow-Origin': '*'
+            }
+          });
+        }
+      }
+      // Backend not ok or no nodes found → fall through to assemble from local cache
+    } catch (e) {
+      console.error('Backend conversion error, falling back to local data:', e && e.message ? e.message : String(e));
+      // Fall through to assemble from local cache
+    }
+  }
+
+  // No target OR backend failed → assemble from local cache
   const assembled = [];
-  const keysToDelete = []; // track keys to delete immediately after assembling response
+  const keysToDelete = [];
   for (const k of replacedURIs) {
     try {
       const cacheKey = k.split('internal/')[1];
@@ -595,13 +609,8 @@ async function processSubscription(request, url, backend) {
   }
 
   if (assembled.length > 0) {
-    // Before returning, delete the cached entries immediately to minimize lifetime of obfuscated content.
-    try {
-      for (const kk of keysToDelete) {
-        memoryCacheDelete(kk);
-      }
-    } catch (e) {
-      // swallow errors to avoid leaking info
+    for (const kk of keysToDelete) {
+      memoryCacheDelete(kk);
     }
 
     return new Response(assembled.join('\r\n'), {
