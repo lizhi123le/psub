@@ -523,7 +523,7 @@ async function processSubscription(request, url, backend) {
         let parsedContext = null;
         try { parsedContext = parseData(content); } catch (e) {}
         const testContent = parsedContext && parsedContext.format === 'base64' ? parsedContext.data : content;
-        const backendIndicatesNoNodes = /no nodes were found|no valid nodes found|not found/i.test(testContent);
+        const backendIndicatesNoNodes = testContent.length < 200 && /no nodes were found|no valid nodes found/i.test(testContent);
         if (!backendIndicatesNoNodes) {
           // Dynamically replace backend domains and handle Base64
           try {
