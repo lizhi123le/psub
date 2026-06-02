@@ -495,7 +495,7 @@ async function processSubscription(request, urlObj, backend, env) {
 
     // Test for backend error in decoded content (not base64-encoded content)
     const testContent = parsedContext && parsedContext.format === 'base64' ? parsedContext.data : content;
-    const backendIndicatesNoNodes = testContent.length < 200 && /no nodes were found|no valid nodes found/i.test(testContent);
+    const backendIndicatesNoNodes = /no nodes were found|no valid nodes found|not found/i.test(testContent);
     if (!response.ok || backendIndicatesNoNodes) {
       const assembled = [];
       let lastYieldTime = Date.now();
