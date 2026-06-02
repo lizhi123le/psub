@@ -6,9 +6,6 @@ export const config = {
 // Environment - set BACKEND in Vercel dashboard
 const BACKEND = process.env.BACKEND || 'https://api.v1.mk';
 
-// Local cache (mimics Cloudflare Worker's localCache)
-const localCache = new Map();
-
 // Memory cache for Vercel subscription content storage
 // Stored value: { content: string, headers?: object, createdAt: number, timeoutId?: number }
 const memoryCache = new Map();
@@ -146,25 +143,6 @@ function getFullUrl(requestUrl) {
   if (stdUrl && stdUrl.includes('://') && stdUrl.length > finalUrl.length) return stdUrl;
 
   try { return decodeURIComponent(finalUrl); } catch (e) { return finalUrl; }
-}
-
-// KV helpers (for Cloudflare Worker - Vercel doesn't have KV but we keep the structure)
-async function kvGet(env, key) {
-  if (localCache.has(key)) return localCache.get(key);
-  try {
-    return null;
-  } catch (e) {
-    console.error('KV get error', e);
-    return null;
-  }
-}
-
-async function kvPut(env, key, value) {
-  try {
-    console.log('KV put not available in Vercel Edge (mimicking Worker pattern)');
-  } catch (e) {
-    console.error('KV put error', e);
-  }
 }
 
 // Helper to extract host from request
@@ -506,10 +484,9 @@ async function processSubscription(request, url, backend) {
   if (target) {
     try {
       const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
-      const originalUrl = url.searchParams.get('url') || targetUrl;
-      // Build backend URL with original subscription URL
+      // Use targetUrl (from getFullUrl which handles long/tricky URLs) as original backend URL
       const backendParams = new URLSearchParams(url.searchParams);
-      backendParams.set('url', originalUrl);
+      backendParams.set('url', targetUrl);
       let backendUrl = `${backendBase}/sub?${backendParams.toString()}`;
 
       const fetchOptions = {
