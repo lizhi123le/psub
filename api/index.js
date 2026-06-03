@@ -390,6 +390,7 @@ function replaceYAMLContent(content, replacements) {
 // Process subscription and replace with local URLs
 async function processSubscription(request, url, backend) {
   const host = getHost(request);
+  const subDir = 'internal';
 
   // Use getFullUrl to robustly extract long/tricky url params
   const targetUrl = getFullUrl(request.url) || url.searchParams.get('url');
@@ -422,8 +423,15 @@ async function processSubscription(request, url, backend) {
     }
   }
 
-  // If there's a target parameter (like 'clash'), forward to backend for conversion and return directly
+  // Make replacedURIs available to all branches
+  const replacedURIs = [];
+
+  // IMPORTANT: replacements maps are local-only and never sent to backend.
+  // They are short-lived and not logged.
+
+  // If there's a target parameter (like 'clash'), forward to backend for conversion first
   if (target) {
+    const replacements = {};
     try {
       const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
       const backendUrl = `${backendBase}${url.pathname}${url.search}`;
@@ -467,6 +475,29 @@ async function processSubscription(request, url, backend) {
         console.error('Domain replace error:', e);
       }
 
+      const parsed = parseData(content);
+      let obfuscatedData = content;
+
+      if (parsed.format === 'yaml') {
+        obfuscatedData = replaceYAMLContent(content, replacements);
+      } else if (parsed.format === 'base64') {
+        try {
+          const lines = parsed.data.split(/\r?\n/).filter(l => l.trim());
+          const out = [];
+          for (const line of lines) {
+            const nl = replaceInUri(line, replacements, false);
+            out.push(nl || line);
+          }
+          obfuscatedData = out.join('\r\n');
+        } catch (e) {
+          obfuscatedData = content;
+        }
+      }
+
+      const key = generateRandomStr(20);
+      memoryCacheSet(key, { content: obfuscatedData || content, headers: Object.fromEntries(response.headers) });
+      replacedURIs.push(`${subDir}/${key}`);
+
       return new Response(content, {
         status: 200,
         headers: {
@@ -479,16 +510,16 @@ async function processSubscription(request, url, backend) {
     }
   }
 
-  // Parse the subscription URL and collect content directly
+  // Parse the subscription URL
   const urlParts = targetUrl.split('|').filter(p => p.trim() !== '');
 
   if (urlParts.length === 0) {
     return new Response('There are no valid links', { status: 400 });
   }
 
-  const collected = [];
-
   for (const rawPart of urlParts) {
+    const key = generateRandomStr(16);
+
     if (rawPart.startsWith('http://') || rawPart.startsWith('https://')) {
       try {
         let signal;
@@ -514,34 +545,74 @@ async function processSubscription(request, url, backend) {
         if (!content || content.trim().length === 0) continue;
 
         const parsed = parseData(content);
+        
+        let obfuscatedData = content;
 
         if (parsed.format === 'base64') {
-          collected.push(parsed.data);
+          const links = parsed.data.split(/\r?\n/).filter(l => l.trim());
+          const replacements = {};
+          const out = [];
+          for (const link of links) {
+            const nl = replaceInUri(link, replacements, false);
+            out.push(nl || link);
+          }
+          obfuscatedData = out.join('\r\n');
         } else if (parsed.format === 'yaml') {
-          collected.push(content);
-        } else {
-          collected.push(content);
+          obfuscatedData = replaceYAMLContent(content, {});
         }
+
+        memoryCacheSet(key, { content: obfuscatedData });
+        replacedURIs.push(`${host}/${subDir}/${key}`);
       } catch (e) {
         console.error('Fetch error:', e && e.message ? e.message : String(e));
         continue;
       }
     } else if (/^(ssr?|vmess1?|trojan|vless|hysteria|hysteria2|tg):\/\//.test(rawPart) || rawPart.startsWith('socks://')) {
-      collected.push(rawPart);
+      memoryCacheSet(key, { content: rawPart });
+      replacedURIs.push(`${host}/${subDir}/${key}`);
     }
   }
 
-  if (collected.length === 0) {
+  if (replacedURIs.length === 0) {
     return new Response('Error: All subscription links are invalid or returned empty content.', { 
       status: 400,
       headers: { 'Content-Type': 'text/plain' }
     });
   }
 
-  return new Response(collected.join('\r\n'), {
-    status: 200,
-    headers: { 'Content-Type': 'text/plain;charset=UTF-8', 'Access-Control-Allow-Origin': '*' }
-  });
+  // Collect all cached content for final response
+  const assembled = [];
+  const keysToDelete = []; // track keys to delete immediately after assembling response
+  for (const k of replacedURIs) {
+    try {
+      const cacheKey = k.split('internal/')[1];
+      const value = memoryCache.get(cacheKey);
+      if (value && value.content) {
+        assembled.push(value.content);
+        keysToDelete.push(cacheKey);
+      }
+    } catch (e) {
+      continue;
+    }
+  }
+
+  if (assembled.length > 0) {
+    // Before returning, delete the cached entries immediately to minimize lifetime of obfuscated content.
+    try {
+      for (const kk of keysToDelete) {
+        memoryCacheDelete(kk);
+      }
+    } catch (e) {
+      // swallow errors to avoid leaking info
+    }
+
+    return new Response(assembled.join('\r\n'), {
+      status: 200,
+      headers: { 'Content-Type': 'text/plain;charset=UTF-8', 'Access-Control-Allow-Origin': '*' }
+    });
+  }
+
+  return new Response('Not found', { status: 404 });
 }
 
 // Main handler
