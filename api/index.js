@@ -1,11 +1,13 @@
 export const config = {
   runtime: 'edge',
-  regions: ['sin1']
+  regions: ['hkg1', 'sin1', 'sfo1']
 };
 
 // Environment - set BACKEND in Vercel dashboard
 const BACKEND = process.env.BACKEND || 'https://api.v1.mk';
 
+// Local cache (mimics Cloudflare Worker's localCache)
+const localCache = new Map();
 
 // Memory cache for Vercel subscription content storage
 // Stored value: { content: string, headers?: object, createdAt: number, timeoutId?: number }
@@ -50,8 +52,7 @@ function utf8ToBase64(str) {
 }
 
 function base64ToUtf8Safe(b64) {
-  const cleaned = b64.replace(/\s/g, '');
-  const padded = cleaned + "=".repeat((4 - (cleaned.length % 4)) % 4);
+  const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
   const base64 = padded.replace(/-/g, '+').replace(/_/g, '/');
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
@@ -145,6 +146,25 @@ function getFullUrl(requestUrl) {
   if (stdUrl && stdUrl.includes('://') && stdUrl.length > finalUrl.length) return stdUrl;
 
   try { return decodeURIComponent(finalUrl); } catch (e) { return finalUrl; }
+}
+
+// KV helpers (for Cloudflare Worker - Vercel doesn't have KV but we keep the structure)
+async function kvGet(env, key) {
+  if (localCache.has(key)) return localCache.get(key);
+  try {
+    return null;
+  } catch (e) {
+    console.error('KV get error', e);
+    return null;
+  }
+}
+
+async function kvPut(env, key, value) {
+  try {
+    console.log('KV put not available in Vercel Edge (mimicking Worker pattern)');
+  } catch (e) {
+    console.error('KV put error', e);
+  }
 }
 
 // Helper to extract host from request
@@ -369,43 +389,107 @@ function replaceYAMLContent(content, replacements) {
 
 // Process subscription and replace with local URLs
 async function processSubscription(request, url, backend) {
-  const targetUrl = getFullUrl(request.url);
+  const host = getHost(request);
+
+  // Use getFullUrl to robustly extract long/tricky url params
+  const targetUrl = getFullUrl(request.url) || url.searchParams.get('url');
+  const target = url.searchParams.get('target');
+
+  // If still no targetUrl, forward to backend /sub and return its response
   if (!targetUrl) {
-    const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
-    const backendUrl = `${backendBase}/sub${url.search}`;
     try {
+      const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
+      const backendUrl = `${backendBase}${url.pathname}${url.search}`;
       const response = await fetch(backendUrl, {
         method: 'GET',
-        headers: { 'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0' }
+        headers: {
+          'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0',
+          'Accept': 'text/plain,*/*'
+        },
+        signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(30000) : undefined
       });
+
       const text = await response.text();
       return new Response(text, {
         status: response.status,
-        headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Access-Control-Allow-Origin': '*' }
+        headers: {
+          'Content-Type': response.headers.get('Content-Type') || 'text/plain; charset=utf-8',
+          'Access-Control-Allow-Origin': '*'
+        }
       });
     } catch (e) {
-      return new Response(`Error forwarding to backend: ${e.message}`, { status: 500 });
+      return new Response(`Error forwarding to backend: ${e && e.message ? e.message : String(e)}`, { status: 500 });
     }
   }
 
-  const host = getHost(request);
-  const subInternalDir = 'internal';
-  const replacements = {};
-  const replacedURIs = [];
-  const keys = [];
-  const fetchErrors = [];
+  // If there's a target parameter (like 'clash'), forward to backend for conversion and return directly
+  if (target) {
+    try {
+      const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
+      const backendUrl = `${backendBase}${url.pathname}${url.search}`;
+      const response = await fetch(backendUrl, {
+        method: 'GET',
+        headers: {
+          'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0',
+          'Accept': 'text/plain,*/*'
+        },
+        signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(30000) : undefined
+      });
 
+      if (!response.ok) {
+        return new Response(`Backend error: ${response.status}`, { status: response.status });
+      }
+
+      let content = await response.text();
+
+      // Dynamically replace backend domains and handle Base64
+      try {
+        const backendHost = new URL(backend).host;
+        const backendRegex = new RegExp(escapeRegExp(backendHost), 'g');
+        const replaceDomains = (str) => {
+          return str
+            .replace(/https:\/\/bulianglin2023\.dev/g, host)
+            .replace(/bulianglin2023\.dev/g, url.host)
+            .replace(new RegExp(`https://${escapeRegExp(backendHost)}`, 'g'), host)
+            .replace(backendRegex, url.host)
+            .replace(/http:\/\/127\.0\.0\.1:25500/g, host)
+            .replace(/127\.0\.0\.1:25500/g, url.host);
+        };
+        
+        const parsedContext = parseData(content);
+        if (parsedContext.format === 'base64') {
+          const replaced = replaceDomains(parsedContext.data);
+          content = utf8ToBase64(replaced);
+        } else {
+          content = replaceDomains(content);
+        }
+      } catch (e) {
+        console.error('Domain replace error:', e);
+      }
+
+      return new Response(content, {
+        status: 200,
+        headers: {
+          'Content-Type': response.headers.get('Content-Type') || 'text/plain',
+          'Access-Control-Allow-Origin': '*'
+        }
+      });
+    } catch (e) {
+      return new Response(`Error forwarding to backend: ${e && e.message ? e.message : String(e)}`, { status: 500 });
+    }
+  }
+
+  // Parse the subscription URL and collect content directly
   const urlParts = targetUrl.split('|').filter(p => p.trim() !== '');
-  const originalUrlParts = [...urlParts]; // Save original URLs for fallback
-  let lastYieldTime = Date.now();
 
-  for (const part of urlParts) {
-    if (Date.now() - lastYieldTime > 5) { await new Promise(r => setTimeout(r, 0)); lastYieldTime = Date.now(); }
-    const key = generateRandomStr(16);
-    let plaintextData = "";
-    let responseHeaders = {};
+  if (urlParts.length === 0) {
+    return new Response('There are no valid links', { status: 400 });
+  }
 
-    if (part.startsWith('http://') || part.startsWith('https://')) {
+  const collected = [];
+
+  for (const rawPart of urlParts) {
+    if (rawPart.startsWith('http://') || rawPart.startsWith('https://')) {
       try {
         let signal;
         if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
@@ -416,224 +500,48 @@ async function processSubscription(request, url, backend) {
           signal = controller.signal;
         }
 
-        const resp = await fetch(part, {
+        const response = await fetch(rawPart, {
           method: 'GET',
-          headers: { "User-Agent": request.headers.get("User-Agent") || "Mozilla/5.0" },
+          headers: {
+            'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0'
+          },
           signal
         });
-        if (resp.ok) {
-          plaintextData = await resp.text();
-          const hdrs = {};
-          const forbiddenHeaders = ['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'keep-alive', 'content-range'];
-          for (const [k, v] of resp.headers.entries()) {
-            if (!forbiddenHeaders.includes(k.toLowerCase())) {
-              hdrs[k] = v;
-            }
-          }
-          responseHeaders = hdrs;
+
+        if (!response.ok) continue;
+
+        const content = await response.text();
+        if (!content || content.trim().length === 0) continue;
+
+        const parsed = parseData(content);
+
+        if (parsed.format === 'base64') {
+          collected.push(parsed.data);
+        } else if (parsed.format === 'yaml') {
+          collected.push(content);
         } else {
-          console.error('remote fetch not ok', part, resp.status);
-          fetchErrors.push(`${part}: HTTP ${resp.status} ${resp.statusText || ''}`);
-          continue;
+          collected.push(content);
         }
       } catch (e) {
-        console.error("Fetch failed:", part, e && e.message ? e.message : e);
-        fetchErrors.push(`${part}: Fetch failed: ${e.message || e}`);
+        console.error('Fetch error:', e && e.message ? e.message : String(e));
         continue;
       }
-    } else {
-      plaintextData = part;
-    }
-
-    if (plaintextData) {
-      const parsed = parseData(plaintextData);
-      let obfuscatedData = plaintextData;
-
-      if (parsed.format === "base64") {
-        const links = parsed.data.split(/\r?\n/).filter(l => l.trim());
-        const newLinks = [];
-        for (const link of links) {
-          if (Date.now() - lastYieldTime > 5) { await new Promise(r => setTimeout(r, 0)); lastYieldTime = Date.now(); }
-          const nl = replaceInUri(link, replacements, false);
-          newLinks.push(nl || link);
-        }
-        obfuscatedData = utf8ToBase64(newLinks.join("\r\n"));
-      } else if (parsed.format === "yaml") {
-        obfuscatedData = replaceYAMLContent(plaintextData, replacements);
-      }
-
-      memoryCacheSet(key, { content: obfuscatedData, headers: responseHeaders });
-      keys.push(key);
-      replacedURIs.push(`${host}/${subInternalDir}/${key}`);
+    } else if (/^(ssr?|vmess1?|trojan|vless|hysteria|hysteria2|tg):\/\//.test(rawPart) || rawPart.startsWith('socks://')) {
+      collected.push(rawPart);
     }
   }
 
-  if (replacedURIs.length === 0) {
-    return new Response("No valid nodes found. Errors:\n" + fetchErrors.join("\n"), { status: 400 });
-  }
-
-  try {
-    const newUrl = replacedURIs.join('|');
-    const incomingParams = new URL(request.url).searchParams;
-    const originalParams = new URLSearchParams();
-
-    const whitelist = [
-      'target', 'config', 'emoji', 'list', 'udp', 'tfo', 'scv', 'fdn',
-      'sort', 'dev', 'bd', 'insert', 'exclude', 'append_info', 'expand',
-      'new_name', 'rename', 'filename', 'path', 'prefix', 'suffix', 'ver',
-      'xudp', 'doh', 'rule', 'script', 'node', 'group', 'filter'
-    ];
-
-    for (const [k, v] of incomingParams.entries()) {
-      if (whitelist.includes(k)) originalParams.set(k, v);
-    }
-    originalParams.set('url', newUrl);
-
-    const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
-    const backendUrl = `${backendBase}/sub?${originalParams.toString()}`;
-
-    const response = await fetch(backendUrl, {
-      method: 'GET',
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+  if (collected.length === 0) {
+    return new Response('Error: All subscription links are invalid or returned empty content.', { 
+      status: 400,
+      headers: { 'Content-Type': 'text/plain' }
     });
-
-    let content = await response.text();
-    
-    // Replace backend domains with current host dynamically
-    let parsedContext = null;
-    try {
-      const backendHost = new URL(backend).host;
-      const backendRegex = new RegExp(escapeRegExp(backendHost), 'g');
-      const replaceDomains = (str) => {
-        return str
-          .replace(/https:\/\/bulianglin2023\.dev/g, host)
-          .replace(/bulianglin2023\.dev/g, url.host)
-          .replace(new RegExp(`https://${escapeRegExp(backendHost)}`, 'g'), host)
-          .replace(backendRegex, url.host)
-          .replace(/http:\/\/127\.0\.0\.1:25500/g, host)
-          .replace(/127\.0\.0\.1:25500/g, url.host);
-      };
-      
-      parsedContext = parseData(content);
-      if (parsedContext.format === 'base64') {
-        const replaced = replaceDomains(parsedContext.data);
-        content = utf8ToBase64(replaced);
-      } else {
-        content = replaceDomains(content);
-      }
-    } catch (e) {
-      console.error('Domain replace error:', e);
-    }
-
-    // Test for backend error in decoded content (not base64-encoded content)
-    const testContent = parsedContext && parsedContext.format === 'base64' ? parsedContext.data : content;
-    const backendIndicatesNoNodes = /no nodes were found|no valid nodes found|not found/i.test(testContent);
-    if (!response.ok || backendIndicatesNoNodes) {
-      const assembled = [];
-      let lastYieldTime = Date.now();
-      for (const k of keys) {
-        if (Date.now() - lastYieldTime > 5) { await new Promise(r => setTimeout(r, 0)); lastYieldTime = Date.now(); }
-        const val = memoryCache.get(k);
-        if (val && val.content) assembled.push(val.content);
-      }
-      if (assembled.length > 0) {
-        const target = incomingParams.get('target');
-        if (target === 'base64') {
-          content = assembled.join('|');
-        } else {
-          let lastYieldTime = Date.now();
-          const decodedParts = [];
-          for (const p of assembled) {
-            if (Date.now() - lastYieldTime > 5) { await new Promise(r => setTimeout(r, 0)); lastYieldTime = Date.now(); }
-            try {
-              const dec = base64ToUtf8Safe(p);
-              if (dec && (dec.includes('://') || dec.includes('proxies:') || dec.includes('port:'))) decodedParts.push(dec);
-              else decodedParts.push(p);
-            } catch (e) {
-              decodedParts.push(p);
-            }
-          }
-          content = decodedParts.join('\r\n');
-        }
-
-        let lastYieldTime = Date.now();
-        for (const k of keys) {
-          if (Date.now() - lastYieldTime > 5) { await new Promise(r => setTimeout(r, 0)); lastYieldTime = Date.now(); }
-          memoryCacheDelete(k);
-        }
-
-        return new Response(content, {
-          status: 200,
-          headers: { "Content-Type": "text/plain; charset=utf-8", "Access-Control-Allow-Origin": "*" }
-        });
-      }
-      return new Response(content, { status: response.status || 500 });
-    }
-
-    // Detect backend conversion failure: named format requested but backend returned base64 (passthrough)
-    // In this case, re-send original (unobfuscated) URLs to backend as fallback
-    const namedTargets = ['clash', 'surge', 'quan', 'quanx', 'loon', 'ss', 'ssr', 'v2ray', 'singbox', 'proxy'];
-    const requestedTarget = incomingParams.get('target');
-    const isNamedFormat = requestedTarget && namedTargets.includes(requestedTarget.toLowerCase());
-    let skipRecovery = false;
-    if (isNamedFormat && parsedContext && parsedContext.format === 'base64' && originalUrlParts.length > 0) {
-      try {
-        const fallbackParams = new URLSearchParams(originalParams);
-        fallbackParams.set('url', originalUrlParts.join('|'));
-        const fallbackUrl = `${backendBase}/sub?${fallbackParams.toString()}`;
-        const fallbackResp = await fetch(fallbackUrl, {
-          method: 'GET',
-          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
-        });
-        if (fallbackResp.ok) {
-          const fallbackContent = await fallbackResp.text();
-          const fallbackParsed = parseData(fallbackContent);
-          if (fallbackParsed.format !== 'base64') {
-            content = fallbackContent;
-            parsedContext = fallbackParsed;
-            skipRecovery = true;
-          }
-        }
-      } catch (e) {
-        console.error('Fallback fetch error:', e);
-      }
-    }
-
-    if (Object.keys(replacements).length > 0 && !skipRecovery) {
-      const recoveryRegex = new RegExp(Object.keys(replacements).map(escapeRegExp).join("|"), "g");
-      let lastYieldTime = Date.now();
-      try {
-        const decoded = base64ToUtf8Safe(content);
-        if (decoded && (decoded.includes("://") || decoded.includes("proxies:") || decoded.includes("port:"))) {
-          const lines = decoded.split(/\r?\n/);
-          const recovered = [];
-          for (const line of lines) {
-            if (Date.now() - lastYieldTime > 5) { await new Promise(r => setTimeout(r, 0)); lastYieldTime = Date.now(); }
-            recovered.push(line.replace(recoveryRegex, (m) => replacements[m] || m));
-          }
-          content = (requestedTarget === "base64" || requestedTarget === "mixed" || (!isNamedFormat && parsedContext && parsedContext.format === "base64")) ? utf8ToBase64(recovered.join("\r\n")) : recovered.join("\r\n");
-        } else {
-          content = content.replace(recoveryRegex, (m) => replacements[m] || m);
-        }
-      } catch (e) {
-        content = content.replace(recoveryRegex, (m) => replacements[m] || m);
-      }
-    }
-
-    let lastYieldTime = Date.now();
-    for (const k of keys) {
-      if (Date.now() - lastYieldTime > 5) { await new Promise(r => setTimeout(r, 0)); lastYieldTime = Date.now(); }
-      memoryCacheDelete(k);
-    }
-
-    return new Response(content, {
-      status: response.status,
-      headers: { "Content-Type": "text/plain; charset=utf-8", "Access-Control-Allow-Origin": "*" }
-    });
-  } catch (e) {
-    console.error('processSubscription error', e);
-    return new Response(`Error: ${e.message || e}`, { status: 500 });
   }
+
+  return new Response(collected.join('\r\n'), {
+    status: 200,
+    headers: { 'Content-Type': 'text/plain;charset=UTF-8', 'Access-Control-Allow-Origin': '*' }
+  });
 }
 
 // Main handler
@@ -707,20 +615,6 @@ export default async function handler(request) {
     } catch (e) {
       console.error('Version fetch error:', e);
     }
-  }
-
-  // Internal temporary subscription endpoint
-  if (url.pathname.includes("/internal/")) {
-    const pathSegments = url.pathname.split("/").filter(s => s);
-    const key = pathSegments[pathSegments.length - 1];
-
-    const value = memoryCache.get(key);
-    if (!value || !value.content) return new Response("Not Found", { status: 404 });
-
-    const headersObj = value.headers || { "Content-Type": "text/plain; charset=utf-8" };
-    const headers = new Headers(headersObj);
-    headers.set("Access-Control-Allow-Origin", "*");
-    return new Response(value.content, { headers });
   }
 
   // Subscription conversion endpoint
