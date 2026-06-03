@@ -393,6 +393,7 @@ async function processSubscription(request, url, backend) {
   const replacements = {};
   const replacedURIs = [];
   const keys = [];
+  const fetchErrors = [];
 
   const urlParts = targetUrl.split('|').filter(p => p.trim() !== '');
   let lastYieldTime = Date.now();
@@ -431,10 +432,12 @@ async function processSubscription(request, url, backend) {
           responseHeaders = hdrs;
         } else {
           console.error('remote fetch not ok', part, resp.status);
+          fetchErrors.push(`${part}: HTTP ${resp.status} ${resp.statusText || ''}`);
           continue;
         }
       } catch (e) {
         console.error("Fetch failed:", part, e && e.message ? e.message : e);
+        fetchErrors.push(`${part}: Fetch failed: ${e.message || e}`);
         continue;
       }
     } else {
@@ -465,7 +468,7 @@ async function processSubscription(request, url, backend) {
   }
 
   if (replacedURIs.length === 0) {
-    return new Response("No valid nodes found", { status: 400 });
+    return new Response("No valid nodes found. Errors:\n" + fetchErrors.join("\n"), { status: 400 });
   }
 
   try {
