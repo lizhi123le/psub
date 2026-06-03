@@ -4,6 +4,7 @@
     { "source": "/version", "destination": "/api/index.js" },
     { "source": "/sub(.*)", "destination": "/api/index.js" },
     { "source": "/subscription/(.*)", "destination": "/api/index.js" },
+    { "source": "/internal/(.*)", "destination": "/api/index.js" },
     { "source": "/", "destination": "/api/index.js" }
   ]
 }
