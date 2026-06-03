@@ -396,6 +396,7 @@ async function processSubscription(request, url, backend) {
   const fetchErrors = [];
 
   const urlParts = targetUrl.split('|').filter(p => p.trim() !== '');
+  const originalUrlParts = [...urlParts]; // Save original URLs for fallback
   let lastYieldTime = Date.now();
 
   for (const part of urlParts) {
@@ -569,9 +570,37 @@ async function processSubscription(request, url, backend) {
       return new Response(content, { status: response.status || 500 });
     }
 
-    if (Object.keys(replacements).length > 0) {
+    // Detect backend conversion failure: named format requested but backend returned base64 (passthrough)
+    // In this case, re-send original (unobfuscated) URLs to backend as fallback
+    const namedTargets = ['clash', 'surge', 'quan', 'quanx', 'loon', 'ss', 'ssr', 'v2ray', 'singbox', 'proxy'];
+    const requestedTarget = incomingParams.get('target');
+    const isNamedFormat = requestedTarget && namedTargets.includes(requestedTarget.toLowerCase());
+    let skipRecovery = false;
+    if (isNamedFormat && parsedContext && parsedContext.format === 'base64' && originalUrlParts.length > 0) {
+      try {
+        const fallbackParams = new URLSearchParams(originalParams);
+        fallbackParams.set('url', originalUrlParts.join('|'));
+        const fallbackUrl = `${backendBase}/sub?${fallbackParams.toString()}`;
+        const fallbackResp = await fetch(fallbackUrl, {
+          method: 'GET',
+          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+        });
+        if (fallbackResp.ok) {
+          const fallbackContent = await fallbackResp.text();
+          const fallbackParsed = parseData(fallbackContent);
+          if (fallbackParsed.format !== 'base64') {
+            content = fallbackContent;
+            parsedContext = fallbackParsed;
+            skipRecovery = true;
+          }
+        }
+      } catch (e) {
+        console.error('Fallback fetch error:', e);
+      }
+    }
+
+    if (Object.keys(replacements).length > 0 && !skipRecovery) {
       const recoveryRegex = new RegExp(Object.keys(replacements).map(escapeRegExp).join("|"), "g");
-      const target = url.searchParams.get("target");
       let lastYieldTime = Date.now();
       try {
         const decoded = base64ToUtf8Safe(content);
@@ -582,9 +611,7 @@ async function processSubscription(request, url, backend) {
             if (Date.now() - lastYieldTime > 5) { await new Promise(r => setTimeout(r, 0)); lastYieldTime = Date.now(); }
             recovered.push(line.replace(recoveryRegex, (m) => replacements[m] || m));
           }
-          const namedTargets = ['clash', 'surge', 'quan', 'quanx', 'loon', 'ss', 'ssr', 'v2ray', 'singbox', 'proxy'];
-          const isNamedFormat = target && namedTargets.includes(target.toLowerCase());
-          content = (target === "base64" || target === "mixed" || (!isNamedFormat && parsedContext && parsedContext.format === "base64")) ? utf8ToBase64(recovered.join("\r\n")) : recovered.join("\r\n");
+          content = (requestedTarget === "base64" || requestedTarget === "mixed" || (!isNamedFormat && parsedContext && parsedContext.format === "base64")) ? utf8ToBase64(recovered.join("\r\n")) : recovered.join("\r\n");
         } else {
           content = content.replace(recoveryRegex, (m) => replacements[m] || m);
         }
