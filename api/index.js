@@ -582,7 +582,9 @@ async function processSubscription(request, url, backend) {
             if (Date.now() - lastYieldTime > 5) { await new Promise(r => setTimeout(r, 0)); lastYieldTime = Date.now(); }
             recovered.push(line.replace(recoveryRegex, (m) => replacements[m] || m));
           }
-          content = (target === "base64" || target === "mixed" || (parsedContext && parsedContext.format === "base64")) ? utf8ToBase64(recovered.join("\r\n")) : recovered.join("\r\n");
+          const namedTargets = ['clash', 'surge', 'quan', 'quanx', 'loon', 'ss', 'ssr', 'v2ray', 'singbox', 'proxy'];
+          const isNamedFormat = target && namedTargets.includes(target.toLowerCase());
+          content = (target === "base64" || target === "mixed" || (!isNamedFormat && parsedContext && parsedContext.format === "base64")) ? utf8ToBase64(recovered.join("\r\n")) : recovered.join("\r\n");
         } else {
           content = content.replace(recoveryRegex, (m) => replacements[m] || m);
         }
