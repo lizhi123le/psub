@@ -422,7 +422,12 @@ async function processSubscription(request, url, backend) {
         if (resp.ok) {
           plaintextData = await resp.text();
           const hdrs = {};
-          for (const [k, v] of resp.headers.entries()) hdrs[k] = v;
+          const forbiddenHeaders = ['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'keep-alive', 'content-range'];
+          for (const [k, v] of resp.headers.entries()) {
+            if (!forbiddenHeaders.includes(k.toLowerCase())) {
+              hdrs[k] = v;
+            }
+          }
           responseHeaders = hdrs;
         } else {
           console.error('remote fetch not ok', part, resp.status);
