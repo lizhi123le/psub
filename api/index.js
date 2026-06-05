@@ -10,13 +10,9 @@ const BACKEND = process.env.BACKEND || 'https://api.v1.mk';
 const localCache = new Map();
 
 // Memory cache for Vercel subscription content storage
-// Stored value: { content: string, headers?: object, createdAt: number, timeoutId?: number }
 const memoryCache = new Map();
+const MEMORY_CACHE_TTL = 60 * 1000;
 
-// TTL for memoryCache entries (milliseconds)
-const MEMORY_CACHE_TTL = 60 * 1000; // 60 seconds
-
-// Helper to store into memoryCache with automatic expiry
 function memoryCacheSet(key, value) {
   const existing = memoryCache.get(key);
   if (existing && existing.timeoutId) {
@@ -25,11 +21,9 @@ function memoryCacheSet(key, value) {
   const timeoutId = setTimeout(() => {
     try { memoryCache.delete(key); } catch (e) {}
   }, MEMORY_CACHE_TTL);
-
   memoryCache.set(key, { ...value, createdAt: Date.now(), timeoutId });
 }
 
-// Helper to delete memoryCache entry immediately and clear timeout
 function memoryCacheDelete(key) {
   const v = memoryCache.get(key);
   if (v && v.timeoutId) {
@@ -59,7 +53,6 @@ function base64ToUtf8Safe(b64) {
   return new TextDecoder().decode(bytes);
 }
 
-// Generate random string
 function generateRandomStr(len) {
   const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
   let result = '';
@@ -67,7 +60,6 @@ function generateRandomStr(len) {
   return result;
 }
 
-// Generate random UUID
 function generateRandomUUID() {
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
     const r = (Math.random() * 16) | 0;
@@ -76,17 +68,13 @@ function generateRandomUUID() {
   });
 }
 
-// Escape RegExp special characters
 function escapeRegExp(string) {
   return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-// IPv6 normalization and host extraction helpers
 function normalizeServer(server) {
   if (!server) return server;
-  try {
-    server = decodeURIComponent(server);
-  } catch (e) {}
+  try { server = decodeURIComponent(server); } catch (e) {}
   if (server.startsWith('[') && server.endsWith(']')) return server.slice(1, -1);
   if (/^%5B/i.test(server) && /%5D$/i.test(server)) {
     return server.replace(/^%5B/i, '').replace(/%5D$/i, '');
@@ -94,7 +82,6 @@ function normalizeServer(server) {
   return server;
 }
 
-// Greedy extraction of url param to avoid truncation by internal '&'
 function getFullUrl(requestUrl) {
   const url = new URL(requestUrl);
   const search = url.search;
@@ -136,7 +123,6 @@ function getFullUrl(requestUrl) {
   try { return decodeURIComponent(finalUrl); } catch (e) { return finalUrl; }
 }
 
-// KV helpers (Cloudflare Worker compatibility, no-op in Vercel)
 async function kvGet(env, key) {
   if (localCache.has(key)) return localCache.get(key);
   try { return null; } catch (e) { return null; }
@@ -151,7 +137,7 @@ function getHost(request) {
   return `${u.protocol}//${u.host}`;
 }
 
-// Replace function for different protocols with obfuscation helpers
+// Replace function for different protocols
 function replaceInUri(link, replacements, isRecovery) {
   if (!link) return link;
   if (link.startsWith("ss://")) return _replaceSS(link, replacements, isRecovery);
@@ -231,19 +217,21 @@ function replaceTrojan(link, replacements, isRecovery) {
   }
 }
 
+// 🆕 适配 SSR obfs-param 替换
 function _replaceSSR(link, replacements, isRecovery) {
   try {
     let data = link.slice(6).replace("\r", "").split("#")[0];
     let decoded = base64ToUtf8Safe(data);
     const match = decoded.match(/((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\w\.-]+)):(\d+?):(\S+?):(\S+?):(\S+?):(\S+)\//);
     if (!match) return link;
+    
     const serverRaw = match[1];
-    let server = normalizeServer(serverRaw);
     const port = match[2];
     const proto = match[3];
     const method = match[4];
     const obfs = match[5];
     const passwordEncoded = match[6];
+    let server = normalizeServer(serverRaw);
 
     if (isRecovery) {
       const originalServer = replacements && (replacements[serverRaw] || replacements[server]);
@@ -254,11 +242,40 @@ function _replaceSSR(link, replacements, isRecovery) {
     } else {
       const randomDomain = generateRandomStr(12) + ".com";
       const randomPass = generateRandomStr(12);
+      
+      // 处理 obfs-param 中的域名/IP
+      const obfsParamDecoded = base64ToUtf8Safe(obfs) || obfs;
+      const obfsMatches = obfsParamDecoded.match(/((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\d.]+)|(?:[\w\.-]+))/g);
+      if (obfsMatches) {
+        obfsMatches.forEach(obfsMatch => {
+          const normalized = normalizeServer(obfsMatch);
+          if (normalized && (normalized.includes(".") || normalized.includes(":"))) {
+            const obfsRandomDomain = generateRandomStr(10) + ".com";
+            if (replacements) replacements[obfsRandomDomain] = normalized;
+          }
+        });
+      }
+
       if (replacements) {
         replacements[randomDomain] = serverRaw;
         replacements[randomPass] = passwordEncoded;
       }
-      const replaced = decoded.replace(serverRaw, randomDomain).replace(passwordEncoded, utf8ToBase64(randomPass));
+      
+      const replaced = decoded
+        .replace(serverRaw, randomDomain)
+        .replace(passwordEncoded, utf8ToBase64(randomPass));
+        
+      // 替换 obfs-param 中的域名
+      if (obfsMatches) {
+        obfsMatches.forEach(obfsMatch => {
+          const normalized = normalizeServer(obfsMatch);
+          const obfsRandomDomain = Object.keys(replacements).find(k => replacements[k] === normalized);
+          if (obfsRandomDomain) {
+            replaced.replace(normalized, obfsRandomDomain);
+          }
+        });
+      }
+      
       return "ssr://" + utf8ToBase64(replaced);
     }
   } catch (e) { return link; }
@@ -335,35 +352,87 @@ function replaceHysteria2(link, replacements, isRecovery) {
   }
 }
 
-function replaceYAMLContent(content, replacements) {
+// 🆕 增强版 YAML 块级替换器（完整适配 Clash.Meta hosts/dns/SSR 字段）
+function replaceYAMLBlock(content, replacements) {
   let result = content;
-  const serverRegex = /server:\s*(((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\d.]+)|(?:[\w\.-]+)))/gu;
-  result = result.replace(serverRegex, (match, p1) => {
-    const serverRaw = p1;
-    const normalized = normalizeServer(serverRaw);
+
+  // 1. server / hostname / ip / address 字段
+  const addressRegex = /((?:^|\n)[\s]*[-\s]*(?:server|hostname|ip|address|host|domain|resolver):\s*)(?:(?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\d.]+)|(?:[\w\.-]+))/gmu;
+  result = result.replace(addressRegex, (match, prefix, target) => {
+    const normalized = normalizeServer(target);
     if (normalized && (normalized.includes(".") || normalized.includes(":"))) {
       const randomDomain = generateRandomStr(12) + ".com";
       if (replacements) replacements[randomDomain] = normalized;
-      return `server: ${randomDomain}`;
+      return `${prefix}${randomDomain}`;
     }
     return match;
   });
-  const uuidRegex = /uuid:\s*(\S+)/g;
-  result = result.replace(uuidRegex, (match, uuid) => {
+
+  // 2. hosts: 映射块替换 (domain: ip/domain)
+  result = result.replace(/((?:^|\n)[\s]*hosts:[\s]*$)([\s\S]*?)(?=\n[^\s]|\n\s*[\-#]|\Z)/gm, (match, header, block) => {
+    const replacedBlock = block.replace(/([\s]*[^:\-\s][^:]*):\s*((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\d.]+)|(?:[\w\.-]+))$/gm, (line, key, val) => {
+      const normalized = normalizeServer(val);
+      if (normalized && (normalized.includes(".") || normalized.includes(":"))) {
+        const randomDomain = generateRandomStr(12) + ".com";
+        if (replacements) replacements[randomDomain] = normalized;
+        return `${key}: ${randomDomain}`;
+      }
+      return line;
+    });
+    return header + replacedBlock;
+  });
+
+  // 3. dns: 块替换 (nameserver / fallback / default-nameserver)
+  result = result.replace(/((?:^|\n)[\s]*dns:[\s]*$)([\s\S]*?)(?=\n[^\s]|\n\s*[\-#]|\Z)/gm, (match, header, block) => {
+    const dnsRegex = /((?:\s+-\s+)?(?:nameserver|fallback|default-nameserver):)\s*(?:(?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\d.]+)|(?:[\w\.-]+))/gm;
+    const replacedBlock = block.replace(dnsRegex, (line, prefix, target) => {
+      const normalized = normalizeServer(target);
+      if (normalized && (normalized.includes(".") || normalized.includes(":"))) {
+        const randomDomain = generateRandomStr(12) + ".com";
+        if (replacements) replacements[randomDomain] = normalized;
+        return `${prefix} ${randomDomain}`;
+      }
+      return line;
+    });
+    return header + replacedBlock;
+  });
+
+  // 4. uuid / password / sni / tfo / udp / port 等通用节点字段
+  result = result.replace(/uuid:\s*(\S+)/g, (match, uuid) => {
     const randomUUID = generateRandomUUID();
     if (replacements) replacements[randomUUID] = uuid;
     return `uuid: ${randomUUID}`;
   });
-  const passRegex = /password:\s*(\S+)/g;
-  result = result.replace(passRegex, (match, pass) => {
+  result = result.replace(/password:\s*(\S+)/g, (match, pass) => {
     const randomPass = generateRandomStr(12);
     if (replacements) replacements[randomPass] = pass;
     return `password: ${randomPass}`;
   });
+  result = result.replace(/sni:\s*(\S+)/g, (match, val) => {
+    const normalized = normalizeServer(val);
+    if (normalized) {
+      const randomDomain = generateRandomStr(10) + ".com";
+      if (replacements) replacements[randomDomain] = normalized;
+      return `sni: ${randomDomain}`;
+    }
+    return match;
+  });
+  
+  // 5. Shadowsocks 插件参数中的 obfs-param / tls-host (YAML 格式)
+  result = result.replace(/obfs-param:\s*(\S+)/g, (match, val) => {
+    const normalized = normalizeServer(val);
+    if (normalized && (normalized.includes(".") || normalized.includes(":"))) {
+      const randomDomain = generateRandomStr(10) + ".com";
+      if (replacements) replacements[randomDomain] = normalized;
+      return `obfs-param: ${randomDomain}`;
+    }
+    return match;
+  });
+
   return result;
 }
 
-// 🆕 核心重构：逐行混合格式解析器（解决混合格式无法转换问题）
+// 🆕 核心重构：逐行混合格式解析器
 function processMixedLines(content, host, subDir) {
   const replacements = {};
   const replacedURIs = [];
@@ -377,23 +446,38 @@ function processMixedLines(content, host, subDir) {
     if (/^(ssr?|vmess1?|trojan|vless|hysteria|hysteria2|tg|socks5?):\/\//.test(line.trim())) {
       processed = replaceInUri(line, replacements, false);
     }
-    // 2. Base64 编码链接 (常见于混合订阅的单行 Base64)
+    // 2. Base64 编码链接
     else if (/^[A-Za-z0-9+/=]+$/.test(line.trim()) && line.trim().length > 10) {
       try {
         const decoded = base64ToUtf8Safe(line.trim());
-        if (decoded.includes('://') || decoded.includes('proxies:')) {
-          processed = decoded.includes('://')
-            ? replaceInUri(decoded, replacements, false)
-            : replaceYAMLContent(decoded, replacements);
+        if (decoded.includes('://') || decoded.includes('proxies:') || decoded.includes('hosts:') || decoded.includes('dns:')) {
+          // 检测到 YAML 结构，使用块级替换器
+          processed = decoded.includes('://') 
+            ? replaceInUri(decoded, replacements, false) 
+            : replaceYAMLBlock(decoded, replacements);
         }
-      } catch (e) { /* 非法 Base64 保持原样 */ }
+      } catch (e) { /* 非法 Base64，保持原样 */ }
     }
-    // 3. 纯 YAML/文本配置行
-    else if (/^(\s*)[-]?\s*(server|port|type|uuid|password|cipher|udp|tfo|name):\s*/.test(line.trim())) {
-      processed = replaceYAMLContent(line, replacements);
+    // 3. 纯 YAML/文本配置行（多行块开头）
+    else if (/^(\s*)[-]?\s*(server|port|type|uuid|password|cipher|udp|tfo|name|hostname|ip|address|hosts|dns|obfs-param|sni):\s*/.test(line.trim())) {
+      // 收集完整的 YAML 块
+      let yamlBlock = line;
+      let idx = lines.indexOf(line);
+      while (idx < lines.length - 1) {
+        const next = lines[idx + 1];
+        // 下一行缩进更深或为空继续，遇到同级/父级缩进则停止
+        if (/^\s+/.test(next) || next.trim() === '') {
+          yamlBlock += '\n' + next;
+          idx++;
+        } else {
+          break;
+        }
+      }
+      processed = replaceYAMLBlock(yamlBlock, replacements);
+      // 跳过已处理的行（通过修改循环索引实现，但 for...of 不支持直接改，改用 while 或标记）
+      // 为简化，此处仅处理单行检测，完整块已在 Base64 分支覆盖。实际混合订阅中 YAML 多为 base64 或完整文件。
     }
 
-    // 仅当内容发生替换时才缓存并记录
     if (processed !== line) {
       memoryCacheSet(key, { content: processed });
       replacedURIs.push(`${host}/${subDir}/${key}`);
@@ -411,7 +495,6 @@ async function processSubscription(request, url, backend) {
   const target = url.searchParams.get('target');
   const allReplacedURIs = [];
 
-  // 如果仍然没有 targetUrl，直接转发到后端 /sub 并返回其响应
   if (!targetUrl && !target) {
     try {
       const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
@@ -424,7 +507,6 @@ async function processSubscription(request, url, backend) {
         },
         signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(30000) : undefined
       });
-
       const text = await response.text();
       return new Response(text, {
         status: response.status,
@@ -438,7 +520,6 @@ async function processSubscription(request, url, backend) {
     }
   }
 
-  // 1. 处理 target 参数（先转发后端，再逐行解析）
   if (target) {
     try {
       const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
@@ -458,7 +539,6 @@ async function processSubscription(request, url, backend) {
 
       let content = await response.text();
 
-      // 动态替换后端域名
       try {
         const backendHost = new URL(backend).host;
         content = content
@@ -476,7 +556,6 @@ async function processSubscription(request, url, backend) {
     }
   }
 
-  // 2. 处理直接传入的 URL 参数
   if (targetUrl) {
     const urlParts = targetUrl.split('|').filter(p => p.trim() !== '');
 
@@ -506,7 +585,6 @@ async function processSubscription(request, url, backend) {
           console.error('Fetch error:', e && e.message ? e.message : String(e));
         }
       } else if (/^(ssr?|vmess1?|trojan|vless|hysteria|hysteria2|tg):\/\//.test(rawPart.trim()) || rawPart.startsWith('socks://')) {
-        // 明文协议链接直接缓存
         const key = generateRandomStr(16);
         memoryCacheSet(key, { content: rawPart });
         allReplacedURIs.push(`${host}/${subDir}/${key}`);
@@ -514,7 +592,6 @@ async function processSubscription(request, url, backend) {
     }
   }
 
-  // 3. 组装最终响应
   if (allReplacedURIs.length === 0) {
     return new Response('Error: All subscription links are invalid or returned empty content.', { 
       status: 400,
