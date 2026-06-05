@@ -18,7 +18,6 @@ const MEMORY_CACHE_TTL = 60 * 1000; // 60 seconds
 
 // Helper to store into memoryCache with automatic expiry
 function memoryCacheSet(key, value) {
-  // Clear existing timeout if present
   const existing = memoryCache.get(key);
   if (existing && existing.timeoutId) {
     try { clearTimeout(existing.timeoutId); } catch (e) {}
@@ -39,7 +38,7 @@ function memoryCacheDelete(key) {
   memoryCache.delete(key);
 }
 
-// UTF-8 <-> Base64 helpers (standard base64, compatible with base64ToUtf8Safe)
+// UTF-8 <-> Base64 helpers
 function utf8ToBase64(str) {
   try {
     return btoa(unescape(encodeURIComponent(str)));
@@ -80,17 +79,6 @@ function generateRandomUUID() {
 // Escape RegExp special characters
 function escapeRegExp(string) {
   return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-// Robust parsing of subscription data format
-function parseData(data) {
-  if (!data) return { format: "unknown", data: data };
-  if (data.includes("proxies:")) return { format: "yaml", data: data };
-  try {
-    const decoded = base64ToUtf8Safe(data.trim());
-    if (decoded.includes("://") || decoded.includes("proxies:")) return { format: "base64", data: decoded };
-  } catch (e) {}
-  return { format: "unknown", data: data };
 }
 
 // IPv6 normalization and host extraction helpers
@@ -148,26 +136,16 @@ function getFullUrl(requestUrl) {
   try { return decodeURIComponent(finalUrl); } catch (e) { return finalUrl; }
 }
 
-// KV helpers (for Cloudflare Worker - Vercel doesn't have KV but we keep the structure)
+// KV helpers (Cloudflare Worker compatibility, no-op in Vercel)
 async function kvGet(env, key) {
   if (localCache.has(key)) return localCache.get(key);
-  try {
-    return null;
-  } catch (e) {
-    console.error('KV get error', e);
-    return null;
-  }
+  try { return null; } catch (e) { return null; }
 }
 
 async function kvPut(env, key, value) {
-  try {
-    console.log('KV put not available in Vercel Edge (mimicking Worker pattern)');
-  } catch (e) {
-    console.error('KV put error', e);
-  }
+  try { console.log('KV put not available in Vercel Edge'); } catch (e) {}
 }
 
-// Helper to extract host from request
 function getHost(request) {
   const u = new URL(request.url);
   return `${u.protocol}//${u.host}`;
@@ -228,9 +206,7 @@ function replaceVmess(link, replacements, isRecovery) {
     jsonData.add = randomDomain;
     jsonData.id = randomUUID;
     return "vmess://" + utf8ToBase64(JSON.stringify(jsonData));
-  } catch (e) {
-    return link;
-  }
+  } catch (e) { return link; }
 }
 
 function replaceTrojan(link, replacements, isRecovery) {
@@ -387,17 +363,56 @@ function replaceYAMLContent(content, replacements) {
   return result;
 }
 
+// 🆕 核心重构：逐行混合格式解析器（解决混合格式无法转换问题）
+function processMixedLines(content, host, subDir) {
+  const replacements = {};
+  const replacedURIs = [];
+  const lines = content.split(/\r?\n/).filter(l => l.trim().length > 0);
+
+  for (const line of lines) {
+    const key = generateRandomStr(16);
+    let processed = line;
+
+    // 1. 直接协议链接 (vmess/ss/trojan/...://)
+    if (/^(ssr?|vmess1?|trojan|vless|hysteria|hysteria2|tg|socks5?):\/\//.test(line.trim())) {
+      processed = replaceInUri(line, replacements, false);
+    }
+    // 2. Base64 编码链接 (常见于混合订阅的单行 Base64)
+    else if (/^[A-Za-z0-9+/=]+$/.test(line.trim()) && line.trim().length > 10) {
+      try {
+        const decoded = base64ToUtf8Safe(line.trim());
+        if (decoded.includes('://') || decoded.includes('proxies:')) {
+          processed = decoded.includes('://')
+            ? replaceInUri(decoded, replacements, false)
+            : replaceYAMLContent(decoded, replacements);
+        }
+      } catch (e) { /* 非法 Base64 保持原样 */ }
+    }
+    // 3. 纯 YAML/文本配置行
+    else if (/^(\s*)[-]?\s*(server|port|type|uuid|password|cipher|udp|tfo|name):\s*/.test(line.trim())) {
+      processed = replaceYAMLContent(line, replacements);
+    }
+
+    // 仅当内容发生替换时才缓存并记录
+    if (processed !== line) {
+      memoryCacheSet(key, { content: processed });
+      replacedURIs.push(`${host}/${subDir}/${key}`);
+    }
+  }
+
+  return replacedURIs;
+}
+
 // Process subscription and replace with local URLs
 async function processSubscription(request, url, backend) {
   const host = getHost(request);
   const subDir = 'internal';
-
-  // Use getFullUrl to robustly extract long/tricky url params
   const targetUrl = getFullUrl(request.url) || url.searchParams.get('url');
   const target = url.searchParams.get('target');
+  const allReplacedURIs = [];
 
-  // If still no targetUrl, forward to backend /sub and return its response
-  if (!targetUrl) {
+  // 如果仍然没有 targetUrl，直接转发到后端 /sub 并返回其响应
+  if (!targetUrl && !target) {
     try {
       const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
       const backendUrl = `${backendBase}${url.pathname}${url.search}`;
@@ -423,15 +438,8 @@ async function processSubscription(request, url, backend) {
     }
   }
 
-  // Make replacedURIs available to all branches
-  const replacedURIs = [];
-
-  // IMPORTANT: replacements maps are local-only and never sent to backend.
-  // They are short-lived and not logged.
-
-  // If there's a target parameter (like 'clash'), forward to backend for conversion first
+  // 1. 处理 target 参数（先转发后端，再逐行解析）
   if (target) {
-    const replacements = {};
     try {
       const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
       const backendUrl = `${backendBase}${url.pathname}${url.search}`;
@@ -450,140 +458,73 @@ async function processSubscription(request, url, backend) {
 
       let content = await response.text();
 
-      // Dynamically replace backend domains and handle Base64
+      // 动态替换后端域名
       try {
         const backendHost = new URL(backend).host;
-        const backendRegex = new RegExp(escapeRegExp(backendHost), 'g');
-        const replaceDomains = (str) => {
-          return str
-            .replace(/https:\/\/bulianglin2023\.dev/g, host)
-            .replace(/bulianglin2023\.dev/g, url.host)
-            .replace(new RegExp(`https://${escapeRegExp(backendHost)}`, 'g'), host)
-            .replace(backendRegex, url.host)
-            .replace(/http:\/\/127\.0\.0\.1:25500/g, host)
-            .replace(/127\.0\.0\.1:25500/g, url.host);
-        };
-        
-        const parsedContext = parseData(content);
-        if (parsedContext.format === 'base64') {
-          const replaced = replaceDomains(parsedContext.data);
-          content = utf8ToBase64(replaced);
-        } else {
-          content = replaceDomains(content);
-        }
-      } catch (e) {
-        console.error('Domain replace error:', e);
-      }
+        content = content
+          .replace(/https:\/\/bulianglin2023\.dev/g, host)
+          .replace(/bulianglin2023\.dev/g, url.host)
+          .replace(new RegExp(`https://${escapeRegExp(backendHost)}`, 'g'), host)
+          .replace(new RegExp(escapeRegExp(backendHost), 'g'), url.host)
+          .replace(/http:\/\/127\.0\.0\.1:25500/g, host)
+          .replace(/127\.0\.0\.1:25500/g, url.host);
+      } catch (e) { console.error('Domain replace error:', e); }
 
-      const parsed = parseData(content);
-      let obfuscatedData = content;
-
-      if (parsed.format === 'yaml') {
-        obfuscatedData = replaceYAMLContent(content, replacements);
-      } else if (parsed.format === 'base64') {
-        try {
-          const lines = parsed.data.split(/\r?\n/).filter(l => l.trim());
-          const out = [];
-          for (const line of lines) {
-            const nl = replaceInUri(line, replacements, false);
-            out.push(nl || line);
-          }
-          obfuscatedData = out.join('\r\n');
-        } catch (e) {
-          obfuscatedData = content;
-        }
-      }
-
-      const key = generateRandomStr(20);
-      memoryCacheSet(key, { content: obfuscatedData || content, headers: Object.fromEntries(response.headers) });
-      replacedURIs.push(`${subDir}/${key}`);
-
-      return new Response(content, {
-        status: 200,
-        headers: {
-          'Content-Type': response.headers.get('Content-Type') || 'text/plain',
-          'Access-Control-Allow-Origin': '*'
-        }
-      });
+      allReplacedURIs.push(...processMixedLines(content, host, subDir));
     } catch (e) {
       return new Response(`Error forwarding to backend: ${e && e.message ? e.message : String(e)}`, { status: 500 });
     }
   }
 
-  // Parse the subscription URL
-  const urlParts = targetUrl.split('|').filter(p => p.trim() !== '');
+  // 2. 处理直接传入的 URL 参数
+  if (targetUrl) {
+    const urlParts = targetUrl.split('|').filter(p => p.trim() !== '');
 
-  if (urlParts.length === 0) {
-    return new Response('There are no valid links', { status: 400 });
-  }
+    if (urlParts.length === 0) {
+      return new Response('There are no valid links', { status: 400 });
+    }
 
-  for (const rawPart of urlParts) {
-    const key = generateRandomStr(16);
+    for (const rawPart of urlParts) {
+      if (rawPart.startsWith('http://') || rawPart.startsWith('https://')) {
+        try {
+          const signal = typeof AbortSignal !== 'undefined' && AbortSignal.timeout 
+            ? AbortSignal.timeout(30000) 
+            : undefined;
 
-    if (rawPart.startsWith('http://') || rawPart.startsWith('https://')) {
-      try {
-        let signal;
-        if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
-          signal = AbortSignal.timeout(30000);
-        } else {
-          const controller = new AbortController();
-          const t = setTimeout(() => controller.abort(), 30000);
-          signal = controller.signal;
+          const response = await fetch(rawPart, {
+            method: 'GET',
+            headers: { 'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0' },
+            signal
+          });
+
+          if (!response.ok || !response.body) continue;
+          const content = await response.text();
+          if (!content.trim()) continue;
+
+          allReplacedURIs.push(...processMixedLines(content, host, subDir));
+        } catch (e) {
+          console.error('Fetch error:', e && e.message ? e.message : String(e));
         }
-
-        const response = await fetch(rawPart, {
-          method: 'GET',
-          headers: {
-            'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0'
-          },
-          signal
-        });
-
-        if (!response.ok) continue;
-
-        const content = await response.text();
-        if (!content || content.trim().length === 0) continue;
-
-        const parsed = parseData(content);
-        
-        let obfuscatedData = content;
-
-        if (parsed.format === 'base64') {
-          const links = parsed.data.split(/\r?\n/).filter(l => l.trim());
-          const replacements = {};
-          const out = [];
-          for (const link of links) {
-            const nl = replaceInUri(link, replacements, false);
-            out.push(nl || link);
-          }
-          obfuscatedData = out.join('\r\n');
-        } else if (parsed.format === 'yaml') {
-          obfuscatedData = replaceYAMLContent(content, {});
-        }
-
-        memoryCacheSet(key, { content: obfuscatedData });
-        replacedURIs.push(`${host}/${subDir}/${key}`);
-      } catch (e) {
-        console.error('Fetch error:', e && e.message ? e.message : String(e));
-        continue;
+      } else if (/^(ssr?|vmess1?|trojan|vless|hysteria|hysteria2|tg):\/\//.test(rawPart.trim()) || rawPart.startsWith('socks://')) {
+        // 明文协议链接直接缓存
+        const key = generateRandomStr(16);
+        memoryCacheSet(key, { content: rawPart });
+        allReplacedURIs.push(`${host}/${subDir}/${key}`);
       }
-    } else if (/^(ssr?|vmess1?|trojan|vless|hysteria|hysteria2|tg):\/\//.test(rawPart) || rawPart.startsWith('socks://')) {
-      memoryCacheSet(key, { content: rawPart });
-      replacedURIs.push(`${host}/${subDir}/${key}`);
     }
   }
 
-  if (replacedURIs.length === 0) {
+  // 3. 组装最终响应
+  if (allReplacedURIs.length === 0) {
     return new Response('Error: All subscription links are invalid or returned empty content.', { 
       status: 400,
       headers: { 'Content-Type': 'text/plain' }
     });
   }
 
-  // Collect all cached content for final response
   const assembled = [];
-  const keysToDelete = []; // track keys to delete immediately after assembling response
-  for (const k of replacedURIs) {
+  const keysToDelete = [];
+  for (const k of allReplacedURIs) {
     try {
       const cacheKey = k.split('internal/')[1];
       const value = memoryCache.get(cacheKey);
@@ -591,20 +532,15 @@ async function processSubscription(request, url, backend) {
         assembled.push(value.content);
         keysToDelete.push(cacheKey);
       }
-    } catch (e) {
-      continue;
-    }
+    } catch (e) { continue; }
   }
 
   if (assembled.length > 0) {
-    // Before returning, delete the cached entries immediately to minimize lifetime of obfuscated content.
     try {
       for (const kk of keysToDelete) {
         memoryCacheDelete(kk);
       }
-    } catch (e) {
-      // swallow errors to avoid leaking info
-    }
+    } catch (e) {}
 
     return new Response(assembled.join('\r\n'), {
       status: 200,
@@ -619,7 +555,6 @@ async function processSubscription(request, url, backend) {
 export default async function handler(request) {
   const url = new URL(request.url);
   
-  // Root - return index.html template
   if (url.pathname === '/' || url.pathname === '') {
     try {
       const frontendUrl = "https://raw.githubusercontent.com/lizhi123le/psub/refs/heads/main/index.html";
@@ -629,20 +564,14 @@ export default async function handler(request) {
         const host = `${url.protocol}//${url.host}`;
         try {
           const backendHost = new URL(BACKEND).host;
-          const backendRegex = new RegExp(escapeRegExp(backendHost), 'g');
           content = content
             .replace(/https:\/\/bulianglin2023\.dev/g, host)
             .replace(/bulianglin2023\.dev/g, url.host);
-        } catch (e) {
-          console.error('Frontend replacement error:', e);
-        }
+        } catch (e) { console.error('Frontend replacement error:', e); }
         return new Response(content, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
       }
-    } catch (e) {
-      console.error('Error loading index.html:', e);
-    }
+    } catch (e) { console.error('Error loading index.html:', e); }
     
-    // Fallback minimal page
     let html = `<!DOCTYPE html>`;
     html += '<html><head><title>psub</title></head><body>';
     html += '<h1>psub</h1><p>Subscription Converter (Vercel Edge Enhanced)</p>';
@@ -655,7 +584,6 @@ export default async function handler(request) {
     });
   }
 
-  // Version endpoint
   if (url.pathname === '/version') {
     try {
       const backend = BACKEND.replace(/(https?:\/\/[^/]+).*$/, "$1");
@@ -668,27 +596,18 @@ export default async function handler(request) {
         if (text && text.trim().length > 1) {
           return new Response(text.trim(), {
             status: 200,
-            headers: {
-              'Content-Type': 'text/plain; charset=utf-8',
-              'Access-Control-Allow-Origin': '*'
-            }
+            headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Access-Control-Allow-Origin': '*' }
           });
         }
       }
 
       return new Response(`Error: Backend returned ${response.status}`, {
         status: 200,
-        headers: {
-          'Content-Type': 'text/plain; charset=utf-8',
-          'Access-Control-Allow-Origin': '*'
-        }
+        headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Access-Control-Allow-Origin': '*' }
       });
-    } catch (e) {
-      console.error('Version fetch error:', e);
-    }
+    } catch (e) { console.error('Version fetch error:', e); }
   }
 
-  // Subscription conversion endpoint
   if (url.pathname === '/sub' || url.pathname.startsWith('/sub')) {
     return await processSubscription(request, url, BACKEND);
   }
