@@ -41,10 +41,6 @@ function base64ToUtf8Safe(b64) {
   return new TextDecoder().decode(bytes);
 }
 
-function urlSafeBase64Encode(input) {
-  return utf8ToBase64(input);
-}
-
 function urlSafeBase64Decode(input) {
   try {
     return base64ToUtf8Safe(input);
@@ -96,11 +92,10 @@ function getFullUrl(requestUrl) {
 }
 
 function parseData(data) {
+  if (!data) return { format: "unknown", data: data };
   if (data.includes("proxies:")) return { format: "yaml", data: data };
-  try {
-    const decoded = urlSafeBase64Decode(data.trim());
-    if (decoded.includes("://") || decoded.includes("proxies:")) return { format: "base64", data: decoded };
-  } catch (e) {}
+  const decoded = urlSafeBase64Decode(data.trim());
+  if (decoded.includes("://") || decoded.includes("proxies:")) return { format: "base64", data: decoded };
   return { format: "unknown", data: data };
 }
 
@@ -148,7 +143,7 @@ function replaceSS(link, replacements, isRecovery) {
       const server = normalizeServer(serverRaw);
       replacements[randomDomain] = server;
       replacements[randomPassword] = password;
-      const newStr = urlSafeBase64Encode(encryption + ":" + randomPassword);
+      const newStr = utf8ToBase64(encryption + ":" + randomPassword);
       return link.replace(base64Data, newStr).replace(serverRaw, randomDomain);
     } catch (e) { return link; }
   }
@@ -209,15 +204,15 @@ function replaceSSR(link, replacements, isRecovery) {
       const originalServer = replacements[server];
       const originalPass = replacements[urlSafeBase64Decode(passwordEncoded)];
       if (!originalServer || !originalPass) return link;
-      const recovered = decoded.replace(serverRaw, originalServer).replace(passwordEncoded, urlSafeBase64Encode(originalPass));
-      return "ssr://" + urlSafeBase64Encode(recovered);
+      const recovered = decoded.replace(serverRaw, originalServer).replace(passwordEncoded, utf8ToBase64(originalPass));
+      return "ssr://" + utf8ToBase64(recovered);
     } else {
       const randomDomain = generateRandomStr(12) + ".com";
       const randomPass = generateRandomStr(12);
       replacements[randomDomain] = server;
       replacements[randomPass] = urlSafeBase64Decode(passwordEncoded);
-      const replaced = decoded.replace(serverRaw, randomDomain).replace(passwordEncoded, urlSafeBase64Encode(randomPass));
-      return "ssr://" + urlSafeBase64Encode(replaced);
+      const replaced = decoded.replace(serverRaw, randomDomain).replace(passwordEncoded, utf8ToBase64(randomPass));
+      return "ssr://" + utf8ToBase64(replaced);
     }
   } catch (e) { return link; }
 }
@@ -327,7 +322,7 @@ async function kvPut(env, key, value) {
   try {
     await env.SUB_BUCKET.put(key, value);
     localCache.set(key, value);
-setTimeout(() => localCache.delete(key), 720000);
+    setTimeout(() => localCache.delete(key), 720000);
   } catch (e) {
     console.error('KV put error', e);
   }
@@ -339,7 +334,7 @@ async function kvGet(env, key) {
     const v = await env.SUB_BUCKET.get(key);
     if (v !== null) {
       localCache.set(key, v);
-setTimeout(() => localCache.delete(key), 720000);
+      setTimeout(() => localCache.delete(key), 720000);
     }
     return v;
   } catch (e) {
@@ -354,6 +349,26 @@ function getHost(request) {
   return `${u.protocol}//${u.host}`;
 }
 
+// Abort signal with timeout fallback
+function createTimeoutSignal(ms) {
+  if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
+    return AbortSignal.timeout(ms);
+  }
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), ms);
+  return controller.signal;
+}
+
+// Clean up KV and local cache entries for a list of keys
+async function cleanupKeys(env, keys) {
+  let lastYieldTime = Date.now();
+  for (const k of keys) {
+    if (Date.now() - lastYieldTime > 5) { await new Promise(r => setTimeout(r, 0)); lastYieldTime = Date.now(); }
+    try { await env.SUB_BUCKET.delete(k); await env.SUB_BUCKET.delete(k + "_headers"); } catch (e) {}
+    localCache.delete(k); localCache.delete(k + "_headers");
+  }
+}
+
 // Main processing function
 async function processSubscription(request, urlObj, backend, env) {
   const targetUrl = getFullUrl(request.url);
@@ -363,7 +378,8 @@ async function processSubscription(request, urlObj, backend, env) {
     try {
       const response = await fetch(backendUrl, {
         method: 'GET',
-        headers: { 'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0' }
+        headers: { 'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0' },
+        signal: createTimeoutSignal(30000)
       });
       const text = await response.text();
       return new Response(text, {
@@ -376,7 +392,6 @@ async function processSubscription(request, urlObj, backend, env) {
   }
 
   const host = getHost(request);
-  const subInternalDir = 'internal';
   const replacements = {};
   const replacedURIs = [];
   const keys = [];
@@ -393,7 +408,8 @@ async function processSubscription(request, urlObj, backend, env) {
     if (part.startsWith('http://') || part.startsWith('https://')) {
       try {
         const resp = await fetch(part, {
-          headers: { "User-Agent": request.headers.get("User-Agent") || "Mozilla/5.0" }
+          headers: { "User-Agent": request.headers.get("User-Agent") || "Mozilla/5.0" },
+          signal: createTimeoutSignal(30000)
         });
         if (resp.ok) {
           plaintextData = await resp.text();
@@ -432,7 +448,7 @@ async function processSubscription(request, urlObj, backend, env) {
       await kvPut(env, key, obfuscatedData);
       await kvPut(env, key + "_headers", JSON.stringify(responseHeaders));
       keys.push(key);
-      replacedURIs.push(`${host}/${subInternalDir}/${key}`);
+      replacedURIs.push(`${host}/internal/${key}`);
     }
   }
 
@@ -462,7 +478,8 @@ async function processSubscription(request, urlObj, backend, env) {
 
     const response = await fetch(backendUrl, {
       method: 'GET',
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      signal: createTimeoutSignal(30000)
     });
 
     let content = await response.text();
@@ -524,12 +541,7 @@ async function processSubscription(request, urlObj, backend, env) {
           content = decodedParts.join('\r\n');
         }
 
-        let lastYieldTime = Date.now();
-        for (const k of keys) {
-          if (Date.now() - lastYieldTime > 5) { await new Promise(r => setTimeout(r, 0)); lastYieldTime = Date.now(); }
-          try { await env.SUB_BUCKET.delete(k); await env.SUB_BUCKET.delete(k + "_headers"); } catch (e) {}
-          localCache.delete(k); localCache.delete(k + "_headers");
-        }
+        await cleanupKeys(env, keys);
 
         return new Response(content, {
           status: 200,
@@ -561,12 +573,7 @@ async function processSubscription(request, urlObj, backend, env) {
       }
     }
 
-    let lastYieldTime = Date.now();
-    for (const k of keys) {
-      if (Date.now() - lastYieldTime > 5) { await new Promise(r => setTimeout(r, 0)); lastYieldTime = Date.now(); }
-      try { await env.SUB_BUCKET.delete(k); await env.SUB_BUCKET.delete(k + "_headers"); } catch (e) {}
-      localCache.delete(k); localCache.delete(k + "_headers");
-    }
+    await cleanupKeys(env, keys);
 
     return new Response(content, {
       status: response.status,
