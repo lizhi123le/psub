@@ -413,6 +413,10 @@ async function cleanupKeys(env, keys) {
 
 // Main processing function
 async function processSubscription(request, urlObj, backend, env) {
+  // Allow temporary backend override via &bd= query param
+  const bdOverride = urlObj.searchParams.get('bd');
+  if (bdOverride) backend = bdOverride;
+
   const targetUrl = getFullUrl(request.url);
   if (!targetUrl) {
     const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
@@ -505,7 +509,7 @@ async function processSubscription(request, urlObj, backend, env) {
 
     const whitelist = [
       'target', 'config', 'emoji', 'list', 'udp', 'tfo', 'scv', 'fdn',
-      'sort', 'dev', 'bd', 'insert', 'exclude', 'append_info', 'expand',
+      'sort', 'dev', 'insert', 'exclude', 'append_info', 'expand',
       'new_name', 'rename', 'filename', 'path', 'prefix', 'suffix', 'ver',
       'xudp', 'doh', 'rule', 'script', 'node', 'group', 'filter'
     ];
