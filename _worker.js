@@ -126,8 +126,6 @@ function replaceInUri(link, replacements, isRecovery) {
 }
 
 function replaceSS(link, replacements, isRecovery) {
-  const randomPassword = generateRandomStr(12);
-  const randomDomain = generateRandomStr(16) + ".com";
   let tempLink = link.slice(5).split("#")[0];
   if (tempLink.includes("@")) {
     const match = tempLink.match(/(\S+?)@((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\d.]+)|(?:[\w\.-]+)):/);
@@ -154,6 +152,8 @@ function replaceSS(link, replacements, isRecovery) {
         return result;
       }
 
+      const randomPassword = generateRandomStr(12);
+      const randomDomain = generateRandomStr(16) + ".com";
       replacements[randomDomain] = server;
       replacements[randomPassword] = password;
       const newStr = utf8ToBase64(encryption + ":" + randomPassword);
@@ -246,8 +246,6 @@ function replaceSocks(link, replacements, isRecovery) {
     const hashPart = hashSplit.length > 1 ? "#" + hashSplit[1] : "";
     temp = hashSplit[0];
     const atIndex = temp.indexOf("@");
-    const fakeIP = `10.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}`;
-    const randomPass = generateRandomStr(12);
 
     if (atIndex !== -1) {
       const authBase64 = temp.slice(0, atIndex);
@@ -272,6 +270,8 @@ function replaceSocks(link, replacements, isRecovery) {
         return result;
       }
 
+      const fakeIP = `10.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}`;
+      const randomPass = generateRandomStr(12);
       replacements[fakeIP] = server;
       if (pass) replacements[randomPass] = pass;
       return `socks://${utf8ToBase64(user + ":" + randomPass)}@${fakeIP}:${port}${hashPart}`;
@@ -288,6 +288,7 @@ function replaceSocks(link, replacements, isRecovery) {
         return link;
       }
 
+      const fakeIP = `10.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}`;
       replacements[fakeIP] = server;
       return `socks://${fakeIP}:${port}${hashPart}`;
     }
@@ -581,7 +582,7 @@ async function processSubscription(request, urlObj, backend, env) {
             if (Date.now() - lastYieldTime > 5) { await new Promise(r => setTimeout(r, 0)); lastYieldTime = Date.now(); }
             try {
               const dec = urlSafeBase64Decode(p);
-              if (dec && (dec.includes('://') || dec.includes('proxies:') || dec.includes('port:'))) decodedParts.push(dec);
+              if (dec && (dec.includes('://') || dec.includes('proxies:') || /port:\s*\d+/.test(dec))) decodedParts.push(dec);
               else decodedParts.push(p);
             } catch (e) {
               decodedParts.push(p);
@@ -636,12 +637,12 @@ async function processSubscription(request, urlObj, backend, env) {
     }
 
     if (Object.keys(replacements).length > 0) {
-      const recoveryRegex = new RegExp(Object.keys(replacements).map(escapeRegExp).join("|"), "g");
+      const recoveryRegex = new RegExp(Object.keys(replacements).sort((a, b) => b.length - a.length).map(escapeRegExp).join("|"), "g");
       const target = urlObj.searchParams.get("target");
       let lastYieldTime = Date.now();
       try {
         const decoded = urlSafeBase64Decode(content);
-        if (decoded && (decoded.includes("://") || decoded.includes("proxies:") || decoded.includes("port:"))) {
+        if (decoded && (decoded.includes("://") || decoded.includes("proxies:") || /port:\s*\d+/.test(decoded))) {
           const lines = decoded.split(/\r?\n/);
           const recovered = [];
           for (const line of lines) {
