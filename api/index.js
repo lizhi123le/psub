@@ -6,9 +6,6 @@ export const config = {
 // Environment - set BACKEND in Vercel dashboard
 const BACKEND = process.env.BACKEND || 'https://api.v1.mk';
 
-// Local cache (mimics Cloudflare Worker's localCache)
-const localCache = new Map();
-
 // Memory cache for Vercel subscription content storage
 // Stored value: { content: string, headers?: object, createdAt: number, timeoutId?: number }
 const memoryCache = new Map();
@@ -146,25 +143,6 @@ function getFullUrl(requestUrl) {
   if (stdUrl && stdUrl.includes('://') && stdUrl.length > finalUrl.length) return stdUrl;
 
   try { return decodeURIComponent(finalUrl); } catch (e) { return finalUrl; }
-}
-
-// KV helpers (for Cloudflare Worker - Vercel doesn't have KV but we keep the structure)
-async function kvGet(env, key) {
-  if (localCache.has(key)) return localCache.get(key);
-  try {
-    return null;
-  } catch (e) {
-    console.error('KV get error', e);
-    return null;
-  }
-}
-
-async function kvPut(env, key, value) {
-  try {
-    console.log('KV put not available in Vercel Edge (mimicking Worker pattern)');
-  } catch (e) {
-    console.error('KV put error', e);
-  }
 }
 
 // Helper to extract host from request
@@ -387,29 +365,42 @@ function replaceYAMLContent(content, replacements) {
   return result;
 }
 
+// Create abort signal with timeout (compatible fallback for older runtimes)
+function createTimeoutSignal(ms) {
+  if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
+    return AbortSignal.timeout(ms);
+  }
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), ms);
+  return controller.signal;
+}
+
+// Forward request to backend (extracted to eliminate code duplication)
+async function fetchFromBackend(request, url, backend) {
+  const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
+  const backendUrl = `${backendBase}${url.pathname}${url.search}`;
+  return fetch(backendUrl, {
+    method: 'GET',
+    headers: {
+      'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0',
+      'Accept': 'text/plain,*/*'
+    },
+    signal: createTimeoutSignal(30000)
+  });
+}
+
 // Process subscription and replace with local URLs
 async function processSubscription(request, url, backend) {
   const host = getHost(request);
-  const subDir = 'internal';
 
   // Use getFullUrl to robustly extract long/tricky url params
-  const targetUrl = getFullUrl(request.url) || url.searchParams.get('url');
+  const targetUrl = getFullUrl(request.url);
   const target = url.searchParams.get('target');
 
   // If still no targetUrl, forward to backend /sub and return its response
   if (!targetUrl) {
     try {
-      const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
-      const backendUrl = `${backendBase}${url.pathname}${url.search}`;
-      const response = await fetch(backendUrl, {
-        method: 'GET',
-        headers: {
-          'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0',
-          'Accept': 'text/plain,*/*'
-        },
-        signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(30000) : undefined
-      });
-
+      const response = await fetchFromBackend(request, url, backend);
       const text = await response.text();
       return new Response(text, {
         status: response.status,
@@ -433,17 +424,7 @@ async function processSubscription(request, url, backend) {
   if (target) {
     const replacements = {};
     try {
-      const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
-      const backendUrl = `${backendBase}${url.pathname}${url.search}`;
-      const response = await fetch(backendUrl, {
-        method: 'GET',
-        headers: {
-          'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0',
-          'Accept': 'text/plain,*/*'
-        },
-        signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(30000) : undefined
-      });
-
+      const response = await fetchFromBackend(request, url, backend);
       if (!response.ok) {
         return new Response(`Backend error: ${response.status}`, { status: response.status });
       }
@@ -496,7 +477,7 @@ async function processSubscription(request, url, backend) {
 
       const key = generateRandomStr(20);
       memoryCacheSet(key, { content: obfuscatedData || content, headers: Object.fromEntries(response.headers) });
-      replacedURIs.push(`${subDir}/${key}`);
+      replacedURIs.push(`internal/${key}`);
 
       return new Response(content, {
         status: 200,
@@ -522,21 +503,12 @@ async function processSubscription(request, url, backend) {
 
     if (rawPart.startsWith('http://') || rawPart.startsWith('https://')) {
       try {
-        let signal;
-        if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
-          signal = AbortSignal.timeout(30000);
-        } else {
-          const controller = new AbortController();
-          const t = setTimeout(() => controller.abort(), 30000);
-          signal = controller.signal;
-        }
-
         const response = await fetch(rawPart, {
           method: 'GET',
           headers: {
             'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0'
           },
-          signal
+          signal: createTimeoutSignal(30000)
         });
 
         if (!response.ok) continue;
@@ -562,14 +534,14 @@ async function processSubscription(request, url, backend) {
         }
 
         memoryCacheSet(key, { content: obfuscatedData });
-        replacedURIs.push(`${host}/${subDir}/${key}`);
+        replacedURIs.push(`${host}/internal/${key}`);
       } catch (e) {
         console.error('Fetch error:', e && e.message ? e.message : String(e));
         continue;
       }
     } else if (/^(ssr?|vmess1?|trojan|vless|hysteria|hysteria2|tg):\/\//.test(rawPart) || rawPart.startsWith('socks://')) {
       memoryCacheSet(key, { content: rawPart });
-      replacedURIs.push(`${host}/${subDir}/${key}`);
+      replacedURIs.push(`${host}/internal/${key}`);
     }
   }
 
