@@ -393,6 +393,13 @@ async function fetchFromBackend(request, url, backend) {
 async function processSubscription(request, url, backend) {
   const host = getHost(request);
 
+  // Allow temporary backend override via &bd= query param
+  const bdOverride = url.searchParams.get('bd');
+  if (bdOverride) {
+    backend = bdOverride;
+    url.searchParams.delete('bd');
+  }
+
   // Use getFullUrl to robustly extract long/tricky url params
   const targetUrl = getFullUrl(request.url);
   const target = url.searchParams.get('target');
