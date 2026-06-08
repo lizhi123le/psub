@@ -478,7 +478,10 @@ async function processSubscription(request, urlObj, backend, env) {
 
     const response = await fetch(backendUrl, {
       method: 'GET',
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      headers: {
+        'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0',
+        'Accept': 'text/plain,*/*'
+      },
       signal: createTimeoutSignal(30000)
     });
 
@@ -621,7 +624,9 @@ export default {
     if (url.pathname === '/version') {
       try {
         const backendBase = BACKEND.replace(/(https?:\/\/[^/]+).*$/, "$1");
-        const response = await fetch(`${backendBase}/version`);
+        const response = await fetch(`${backendBase}/version`, {
+          headers: { 'User-Agent': 'Mozilla/5.0' }
+        });
         const text = await response.text();
         return new Response(text, { status: response.status, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Access-Control-Allow-Origin': '*' } });
       } catch (e) {
