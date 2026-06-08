@@ -551,7 +551,11 @@ async function processSubscription(request, url, backend) {
     for (const [k, v] of incomingParams.entries()) {
       if (whitelist.includes(k)) originalParams.set(k, v);
     }
-    originalParams.set('url', newUrl);
+    // When target format conversion is requested (e.g. target=singbox),
+    // send the ORIGINAL subscription URL directly to the backend.
+    // The obfuscated internal URL approach doesn't work because the
+    // backend may not be able to reliably fetch back from psub.
+    originalParams.set('url', incomingParams.has('target') ? targetUrl : newUrl);
 
     const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
     const backendUrl = `${backendBase}/sub?${originalParams.toString()}`;
