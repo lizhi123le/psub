@@ -685,7 +685,7 @@ async function processSubscription(request, url, backend) {
             }
           }
           const targetFmt = url.searchParams.get("target");
-          content = (targetFmt === "base64") ? utf8ToBase64(recovered.join("\r\n")) : recovered.join("\r\n");
+          content = (targetFmt === "base64" || targetFmt === "mixed") ? utf8ToBase64(recovered.join("\r\n")) : recovered.join("\r\n");
         } else {
           content = content.replace(recoveryRegex, (m) => replacements[m] || m);
         }
