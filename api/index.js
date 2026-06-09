@@ -1,3 +1,14 @@
+/*
+ * File: index.js
+ * Description: Subscription converter proxy for Vercel Edge Runtime
+ * Features:
+ * - Robust URL extraction & Base64 handling
+ * - Safe global regex replacements
+ * - Fragment (#) preservation for protocols
+ * - Optimized memory cache with TTL & cleanup
+ * - Edge Runtime optimized fetch & signal handling
+ */
+
 export const config = {
   runtime: 'edge',
   regions: ['hkg1', 'sin1', 'sfo1']
@@ -15,7 +26,6 @@ const MEMORY_CACHE_TTL = 60 * 1000; // 60 seconds
 
 // Helper to store into memoryCache with automatic expiry
 function memoryCacheSet(key, value) {
-  // Clear existing timeout if present
   const existing = memoryCache.get(key);
   if (existing && existing.timeoutId) {
     try { clearTimeout(existing.timeoutId); } catch (e) {}
@@ -23,7 +33,6 @@ function memoryCacheSet(key, value) {
   const timeoutId = setTimeout(() => {
     try { memoryCache.delete(key); } catch (e) {}
   }, MEMORY_CACHE_TTL);
-
   memoryCache.set(key, { ...value, createdAt: Date.now(), timeoutId });
 }
 
@@ -36,15 +45,16 @@ function memoryCacheDelete(key) {
   memoryCache.delete(key);
 }
 
-// UTF-8 <-> Base64 helpers (standard base64, compatible with base64ToUtf8Safe)
+// UTF-8 <-> Base64 helpers (robust & Edge-optimized)
 function utf8ToBase64(str) {
   try {
-    return btoa(unescape(encodeURIComponent(str)));
+    const encoder = new TextEncoder();
+    const bytes = encoder.encode(str);
+    const bin = String.fromCharCode(...bytes);
+    return btoa(bin);
   } catch (e) {
-    const bytes = new TextEncoder().encode(str);
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-    return btoa(binary);
+    // Fallback for older environments
+    return btoa(unescape(encodeURIComponent(str)));
   }
 }
 
@@ -103,7 +113,7 @@ function normalizeServer(server) {
   return server;
 }
 
-// Greedy extraction of url param to avoid truncation by internal '&'
+// Improved URL extraction that handles '&' inside values correctly
 function getFullUrl(requestUrl) {
   const url = new URL(requestUrl);
   const search = url.search;
@@ -154,19 +164,23 @@ function getHost(request) {
 // Replace function for different protocols with obfuscation helpers
 function replaceInUri(link, replacements, isRecovery) {
   if (!link) return link;
-  if (link.startsWith("ss://")) return _replaceSS(link, replacements, isRecovery);
-  if (link.startsWith("ssr://")) return _replaceSSR(link, replacements, isRecovery);
-  if (link.startsWith("vmess://")) return replaceVmess(link, replacements, isRecovery);
-  if (link.startsWith("trojan://") || link.startsWith("vless://")) return replaceTrojan(link, replacements, isRecovery);
-  if (link.startsWith("hysteria://")) return replaceHysteria(link, replacements, isRecovery);
-  if (link.startsWith("hysteria2://")) return replaceHysteria2(link, replacements, isRecovery);
-  if (link.startsWith("socks://") || link.startsWith("socks5://")) return replaceSocks(link, replacements, isRecovery);
-  return link;
+  // Strip fragment before processing
+  const linkWithoutFragment = link.replace(/#.*$/, '');
+  const fragment = link.includes('#') ? link.substring(link.lastIndexOf('#')) : '';
+
+  if (linkWithoutFragment.startsWith("ss://")) return _replaceSS(linkWithoutFragment, replacements, isRecovery, fragment);
+  if (linkWithoutFragment.startsWith("ssr://")) return _replaceSSR(linkWithoutFragment, replacements, isRecovery, fragment);
+  if (linkWithoutFragment.startsWith("vmess://")) return replaceVmess(linkWithoutFragment, replacements, isRecovery, fragment);
+  if (linkWithoutFragment.startsWith("trojan://") || linkWithoutFragment.startsWith("vless://")) return replaceTrojan(linkWithoutFragment, replacements, isRecovery, fragment);
+  if (linkWithoutFragment.startsWith("hysteria://")) return replaceHysteria(linkWithoutFragment, replacements, isRecovery, fragment);
+  if (linkWithoutFragment.startsWith("hysteria2://")) return replaceHysteria2(linkWithoutFragment, replacements, isRecovery, fragment);
+  if (linkWithoutFragment.startsWith("socks://") || linkWithoutFragment.startsWith("socks5://")) return replaceSocks(linkWithoutFragment, replacements, isRecovery, fragment);
+  return linkWithoutFragment + fragment;
 }
 
 // --- Protocol-specific replacement functions ---
 
-function _replaceSS(link, replacements, isRecovery) {
+function _replaceSS(link, replacements, isRecovery, fragment) {
   const randomPassword = generateRandomStr(12);
   const randomDomain = randomPassword + ".com";
   let tempLink = link.slice(5).split("#")[0];
@@ -185,13 +199,13 @@ function _replaceSS(link, replacements, isRecovery) {
       if (replacements && server) replacements[randomDomain] = server;
       if (replacements && password) replacements[randomPassword] = password;
       const newStr = utf8ToBase64(encryption + ":" + randomPassword);
-      return link.replace(base64Data, newStr).replace(serverRaw, randomDomain);
+      return link.replace(base64Data, newStr).replace(serverRaw, randomDomain) + fragment;
     } catch (e) { return link; }
   }
   return link;
 }
 
-function replaceVmess(link, replacements, isRecovery) {
+function replaceVmess(link, replacements, isRecovery, fragment) {
   let tempLink = link.replace("vmess://", "");
   try {
     const decoded = base64ToUtf8Safe(tempLink);
@@ -205,141 +219,146 @@ function replaceVmess(link, replacements, isRecovery) {
     if (replacements && uuid) replacements[randomUUID] = uuid;
     jsonData.add = randomDomain;
     jsonData.id = randomUUID;
-    return "vmess://" + utf8ToBase64(JSON.stringify(jsonData));
+    return "vmess://" + utf8ToBase64(JSON.stringify(jsonData)) + fragment;
   } catch (e) {
     return link;
   }
 }
 
-function replaceTrojan(link, replacements, isRecovery) {
+function replaceTrojan(link, replacements, isRecovery, fragment) {
   const re = /(vless|trojan):\/\/(.*?)@((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\d.]+)|(?:[\w\.-]+)):/;
-  const match = link.match(re);
-  if (!match) return link;
-  const uuid = match[2];
-  const rawHost = match[3];
-  const server = normalizeServer(rawHost);
-
-  if (isRecovery) {
-    const original = replacements && (replacements[server] || replacements[rawHost]);
-    return original ? link.replace(rawHost, original) : link;
-  } else {
-    const randomDomain = generateRandomStr(10) + ".com";
-    const randomUUID = generateRandomUUID();
-    if (replacements) {
-      replacements[randomDomain] = server;
-      replacements[randomUUID] = uuid;
-    }
-    return link.replace(uuid, randomUUID).replace(rawHost, randomDomain);
-  }
-}
-
-function _replaceSSR(link, replacements, isRecovery) {
-  try {
-    let data = link.slice(6).replace("\r", "").split("#")[0];
-    let decoded = base64ToUtf8Safe(data);
-    const match = decoded.match(/((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\w\.-]+)):(\d+?):(\S+?):(\S+?):(\S+?):(\S+)\//);
+    const match = link.match(re);
     if (!match) return link;
-    const serverRaw = match[1];
-    let server = normalizeServer(serverRaw);
-    const port = match[2];
-    const proto = match[3];
-    const method = match[4];
-    const obfs = match[5];
-    const passwordEncoded = match[6];
+    const uuid = match[2];
+    const rawHost = match[3];
+    const server = normalizeServer(rawHost);
 
     if (isRecovery) {
-      const originalServer = replacements && (replacements[serverRaw] || replacements[server]);
-      const originalPass = passwordEncoded ? base64ToUtf8Safe(passwordEncoded) : null;
-      if (!originalServer || !originalPass) return link;
-      const recovered = decoded.replace(serverRaw, originalServer).replace(passwordEncoded, utf8ToBase64(originalPass));
-      return "ssr://" + utf8ToBase64(recovered);
+        const original = replacements && (replacements[server] || replacements[rawHost]);
+        const recoveredLink = original ? link.replace(rawHost, original) : link;
+        return recoveredLink + fragment;
     } else {
-      const randomDomain = generateRandomStr(12) + ".com";
-      const randomPass = generateRandomStr(12);
-      if (replacements) {
-        replacements[randomDomain] = serverRaw;
-        replacements[randomPass] = passwordEncoded;
-      }
-      const replaced = decoded.replace(serverRaw, randomDomain).replace(passwordEncoded, utf8ToBase64(randomPass));
-      return "ssr://" + utf8ToBase64(replaced);
+        const randomDomain = generateRandomStr(10) + ".com";
+        const randomUUID = generateRandomUUID();
+        if (replacements) {
+            replacements[randomDomain] = server;
+            replacements[randomUUID] = uuid;
+        }
+        return link.replace(uuid, randomUUID).replace(rawHost, randomDomain) + fragment;
     }
-  } catch (e) { return link; }
 }
 
-function replaceSocks(link, replacements, isRecovery) {
-  try {
-    let temp = link.replace(/^socks5?:\/\//, "");
-    const hashSplit = temp.split("#");
-    const hashPart = hashSplit.length > 1 ? "#" + hashSplit[1] : "";
-    temp = hashSplit[0];
-    const atIndex = temp.indexOf("@");
-    const fakeIP = `10.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}`;
-    
-    if (atIndex !== -1) {
-      const authBase64 = temp.slice(0, atIndex);
-      const serverPort = temp.slice(atIndex + 1);
-      const auth = base64ToUtf8Safe(authBase64);
-      const [user, pass] = auth.split(":");
-      const serverMatch = serverPort.match(/^(((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\d.]+)|(?:[\w\.-]+))):(\d+)$/);
-      if (!serverMatch) return link;
-      const serverRaw = serverMatch[1];
-      if (replacements) replacements[fakeIP] = serverRaw;
-      const randomPass = generateRandomStr(12);
-      const port = serverMatch[3];
-      if (pass && replacements) replacements[randomPass] = pass;
-      return `socks://${utf8ToBase64(user + ":" + randomPass)}@${fakeIP}:${port}${hashPart}`;
+function _replaceSSR(link, replacements, isRecovery, fragment) {
+    try {
+        let data = link.slice(6).replace("\r", "").split("#")[0];
+        let decoded = base64ToUtf8Safe(data);
+        const match = decoded.match(/((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\w\.-]+)):(\d+?):(\S+?):(\S+?):(\S+?):(\S+)\//);
+        if (!match) return link;
+        const serverRaw = match[1];
+        let server = normalizeServer(serverRaw);
+        const port = match[2];
+        const proto = match[3];
+        const method = match[4];
+        const obfs = match[5];
+        const passwordEncoded = match[6];
+
+        if (isRecovery) {
+            const originalServer = replacements && (replacements[serverRaw] || replacements[server]);
+            const originalPass = passwordEncoded ? base64ToUtf8Safe(passwordEncoded) : null;
+            if (!originalServer || !originalPass) return link;
+            const recovered = decoded.replace(serverRaw, originalServer).replace(passwordEncoded, utf8ToBase64(originalPass));
+            return "ssr://" + utf8ToBase64(recovered) + fragment;
+        } else {
+            const randomDomain = generateRandomStr(12) + ".com";
+            const randomPass = generateRandomStr(12);
+            if (replacements) {
+                replacements[randomDomain] = serverRaw;
+                replacements[randomPass] = passwordEncoded;
+            }
+            const replaced = decoded.replace(serverRaw, randomDomain).replace(passwordEncoded, utf8ToBase64(randomPass));
+            return "ssr://" + utf8ToBase64(replaced) + fragment;
+        }
+    } catch (e) { return link; }
+}
+
+function replaceSocks(link, replacements, isRecovery, fragment) {
+    try {
+        let temp = link.replace(/^socks5?:\/\//, "");
+        const hashSplit = temp.split("#");
+        const hashPart = hashSplit.length > 1 ? "#" + hashSplit[1] : "";
+        temp = hashSplit[0];
+        const atIndex = temp.indexOf("@");
+        const fakeIP = `10.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}`;
+        
+        if (atIndex !== -1) {
+            const authBase64 = temp.slice(0, atIndex);
+            const serverPort = temp.slice(atIndex + 1);
+            const auth = base64ToUtf8Safe(authBase64);
+            const [user, pass] = auth.split(":");
+            const serverMatch = serverPort.match(/^(((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\d.]+)|(?:[\w\.-]+))):(\d+)$/);
+            if (!serverMatch) return link;
+            const serverRaw = serverMatch[1];
+            if (replacements) replacements[fakeIP] = serverRaw;
+            const randomPass = generateRandomStr(12);
+            const port = serverMatch[3];
+            if (pass && replacements) replacements[randomPass] = pass;
+            return `socks://${utf8ToBase64(user + ":" + randomPass)}@${fakeIP}:${port}${hashPart}`;
+        } else {
+            const serverMatch = temp.match(/^(((?:\[[\da-fA-F:]+\])|(?:[\d\-\w\.]+))):(\d+)$/);
+            if (!serverMatch) return link;
+            const serverRaw = serverMatch[1];
+            if (replacements) replacements[fakeIP] = serverRaw;
+            return `socks://${fakeIP}:${serverMatch[3]}${hashPart}`;
+        }
+    } catch (e) { return link; }
+}
+
+function replaceHysteria(link, replacements, isRecovery, fragment) {
+    const re = /hysteria:\/\/(((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\d.]+)|(?:[\w\.-]+))):/;
+    const match = link.match(re);
+    if (!match) return link;
+    const rawHost = match[1];
+    const server = normalizeServer(rawHost);
+
+    if (isRecovery) {
+        const original = replacements && (replacements[server] || replacements[rawHost]);
+        const recoveredLink = original ? link.replace(rawHost, original) : link;
+        return recoveredLink + fragment;
     } else {
-      const serverMatch = temp.match(/^(((?:\[[\da-fA-F:]+\])|(?:[\d\-\w\.]+))):(\d+)$/);
-      if (!serverMatch) return link;
-      const serverRaw = serverMatch[1];
-      if (replacements) replacements[fakeIP] = serverRaw;
-      return `socks://${fakeIP}:${serverMatch[3]}${hashPart}`;
+        const randomDomain = generateRandomStr(12) + ".com";
+        if (replacements) replacements[randomDomain] = rawHost;
+        return link.replace(rawHost, randomDomain) + fragment;
     }
-  } catch (e) { return link; }
 }
 
-function replaceHysteria(link, replacements, isRecovery) {
-  const re = /hysteria:\/\/(((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\d.]+)|(?:[\w\.-]+))):/;
-  const match = link.match(re);
-  if (!match) return link;
-  const rawHost = match[1];
-  const server = normalizeServer(rawHost);
+function replaceHysteria2(link, replacements, isRecovery, fragment) {
+    const re = /(hysteria2):\/\/(.*)@(((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\d.]+)|(?:[\w\.-]+))):/;
+    const match = link.match(re);
+    if (!match) return link;
+    const uuid = match[2];
+    const rawHost = match[3];
+    const server = normalizeServer(rawHost);
 
-  if (isRecovery) {
-    const original = replacements && (replacements[server] || replacements[rawHost]);
-    return original ? link.replace(rawHost, original) : link;
-  } else {
-    const randomDomain = generateRandomStr(12) + ".com";
-    if (replacements) replacements[randomDomain] = rawHost;
-    return link.replace(rawHost, randomDomain);
-  }
-}
-
-function replaceHysteria2(link, replacements, isRecovery) {
-  const re = /(hysteria2):\/\/(.*)@(((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\d.]+)|(?:[\w\.-]+))):/;
-  const match = link.match(re);
-  if (!match) return link;
-  const uuid = match[2];
-  const rawHost = match[3];
-  const server = normalizeServer(rawHost);
-
-  if (isRecovery) {
-    const original = replacements && (replacements[server] || replacements[rawHost]);
-    return original ? link.replace(rawHost, original) : link;
-  } else {
-    const randomDomain = generateRandomStr(10) + ".com";
-    const randomUUID = generateRandomUUID();
-    if (replacements) {
-      replacements[randomDomain] = rawHost;
-      replacements[randomUUID] = uuid;
+    if (isRecovery) {
+        const original = replacements && (replacements[server] || replacements[rawHost]);
+        const recoveredLink = original ? link.replace(rawHost, original) : link;
+        return recoveredLink + fragment;
+    } else {
+        const randomDomain = generateRandomStr(10) + ".com";
+        const randomUUID = generateRandomUUID();
+        if (replacements) {
+            replacements[randomDomain] = rawHost;
+            replacements[randomUUID] = uuid;
+        }
+        return link.replace(uuid, randomUUID).replace(rawHost, randomDomain) + fragment;
     }
-    return link.replace(uuid, randomUUID).replace(rawHost, randomDomain);
-  }
 }
 
+// Uses function-based replace to avoid global regex lastIndex side-effects
 function replaceYAMLContent(content, replacements) {
   let result = content;
-  const serverRegex = /server:\s*(((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\d.]+)|(?:[\w\.-]+)))/gu;
+  
+  const serverRegex = /server:\s*(((?:\[[\da-fA-F:]+\])|(?:[\da-fA-F:]+)|(?:[\d.]+)|(?:[\w\.-]+)))/g;
   result = result.replace(serverRegex, (match, p1) => {
     const serverRaw = p1;
     const normalized = normalizeServer(serverRaw);
@@ -350,22 +369,25 @@ function replaceYAMLContent(content, replacements) {
     }
     return match;
   });
+
   const uuidRegex = /uuid:\s*(\S+)/g;
   result = result.replace(uuidRegex, (match, uuid) => {
     const randomUUID = generateRandomUUID();
     if (replacements) replacements[randomUUID] = uuid;
     return `uuid: ${randomUUID}`;
   });
+
   const passRegex = /password:\s*(\S+)/g;
   result = result.replace(passRegex, (match, pass) => {
     const randomPass = generateRandomStr(12);
     if (replacements) replacements[randomPass] = pass;
     return `password: ${randomPass}`;
   });
+
   return result;
 }
 
-// Create abort signal with timeout (compatible fallback for older runtimes)
+// Create abort signal with timeout (Edge Runtime optimized)
 function createTimeoutSignal(ms) {
   if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
     return AbortSignal.timeout(ms);
