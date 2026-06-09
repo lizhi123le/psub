@@ -540,16 +540,12 @@ async function processSubscription(request, url, backend) {
     const incomingParams = url.searchParams;
     const originalParams = new URLSearchParams();
 
-    // Whitelist of params to pass through to backend
-    const whitelist = [
-      'target', 'config', 'emoji', 'list', 'udp', 'tfo', 'scv', 'fdn',
-      'sort', 'dev', 'insert', 'exclude', 'append_info', 'expand',
-      'new_name', 'rename', 'filename', 'path', 'prefix', 'suffix', 'ver',
-      'xudp', 'doh', 'rule', 'script', 'node', 'group', 'filter'
-    ];
-
+    // Pass through all params to backend except psub-internal ones (`url`, `bd`).
+    // The backend (subconverter) forwards unknown params to the subscription URL fetch,
+    // which supports custom subscription-level parameters like `af=`.
+    // Previously a whitelist was used, but that dropped custom sub-store params.
     for (const [k, v] of incomingParams.entries()) {
-      if (whitelist.includes(k)) originalParams.set(k, v);
+      if (k !== 'url' && k !== 'bd') originalParams.set(k, v);
     }
     // Format conversion 请求时（如 target=clash/singbox），后端需要真实订阅数据做转换，
     // 发原始 URL 而非混淆后的 internal URL，避免后端因跨实例路由取不到数据。
