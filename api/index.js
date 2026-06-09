@@ -551,7 +551,9 @@ async function processSubscription(request, url, backend) {
     for (const [k, v] of incomingParams.entries()) {
       if (whitelist.includes(k)) originalParams.set(k, v);
     }
-    originalParams.set('url', newUrl);
+    // Format conversion 请求时（如 target=clash/singbox），后端需要真实订阅数据做转换，
+    // 发原始 URL 而非混淆后的 internal URL，避免后端因跨实例路由取不到数据。
+    originalParams.set('url', incomingParams.has('target') ? targetUrl : newUrl);
 
     const backendBase = backend.replace(/(https?:\/\/[^/]+).*$/, "$1");
     const backendUrl = `${backendBase}/sub?${originalParams.toString()}`;
